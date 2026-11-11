@@ -3,7 +3,7 @@ use std::rc::Rc;
 use rp2040rs::clock::MockClock;
 use rp2040rs::rp2040::Rp2040;
 use rp2040rs::utils::pio_assembler::{
-    pio_in, pio_irq, pio_jmp, pio_pull, PIO_COND_ALWAYS, PIO_SRC_PINS,
+    pio_in, pio_irq, pio_jmp, pio_pull, pio_set, PIO_COND_ALWAYS, PIO_SRC_PINS,
 };
 
 const PIO0: u32 = 0x5020_0000;
@@ -28,6 +28,20 @@ const PUSH_THRESH_SHIFT: u32 = 20;
 const EXECCTRL_WRAP_TOP_SHIFT: u32 = 12;
 const INTR_SM0_TXNFULL: u32 = 1 << 4;
 const INTR_IRQ0: u32 = 1 << 8;
+const DBG_PADOUT: u32 = PIO0 + 0x03c;
+
+#[test]
+fn five_bit_sideset_drives_all_five_pins() {
+    let rp = Rp2040::new();
+    rp.write_u16(INSTR_MEM0, pio_set(1, 0, 0x1f)); // SET X, 0 with sideset 0x1f
+    rp.write_u32(SM0_PINCTRL, 5 << 29); // SIDESET_COUNT=5, base=0
+    rp.write_u32(CTRL, 1);
+    // Execute the SET once; the following zero-filled instruction would clear
+    // the side-set pins if the 1000-step burst kept running.
+    rp.pio[0].step();
+
+    assert_eq!(rp.read_u32(DBG_PADOUT) & 0x1f, 0x1f);
+}
 
 #[test]
 fn pio_keeps_running_after_the_initial_burst() {

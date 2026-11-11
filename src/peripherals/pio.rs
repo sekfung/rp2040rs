@@ -762,9 +762,10 @@ impl Pio {
         let sideset_count = state.machines[index].sideset_count();
         let delay_sideset = (opcode >> 8) & 0x1f;
         let side_en = state.machines[index].exec_ctrl & EXECCTRL_SIDE_EN != 0;
-        let delay = delay_sideset & Self::mask_for(5 - sideset_count.min(4));
+        let side_field_bits = 5u32.saturating_sub(sideset_count);
+        let delay = delay_sideset & Self::mask_for(side_field_bits);
         if sideset_count > 0 && (!side_en || delay_sideset & 0x10 != 0) {
-            let sideset = delay_sideset >> (5 - sideset_count.min(4));
+            let sideset = delay_sideset >> side_field_bits;
             let base = state.machines[index].sideset_base();
             let count = if side_en {
                 sideset_count - 1
