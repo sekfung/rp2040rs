@@ -15,9 +15,11 @@ cargo clippy --all-targets -- -D warnings
 cargo build --release
 ```
 
-The foundation stage ports the upstream FIFO, time, Cortex-M0+ opcode, and PIO
-opcode tests: 91 unit tests. See `docs/parity.md` for the mapping to the
-upstream `vitest` suite and the remaining stages.
+The core stage ports the upstream FIFO, time, Cortex-M0+ opcode, PIO opcode,
+RP2040 bus/NVIC, and Cortex-M0+ instruction tests: 239 unit tests. APB
+peripherals beyond PPB/NVIC are stubs until the peripheral stage. See
+`docs/parity.md` for the mapping to the upstream `vitest` suite and the
+remaining stages.
 
 ## License
 

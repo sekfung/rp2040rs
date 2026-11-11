@@ -2588,8 +2588,10 @@ mod tests {
         cpu.single_step();
         let r = cpu.read_registers();
         assert_eq!(r.r0, 0);
+        assert!(!r.n);
         assert!(r.z);
         assert!(!r.c);
+        assert!(!r.v);
     }
 
     #[test]

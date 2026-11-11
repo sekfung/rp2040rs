@@ -12,8 +12,8 @@ Upstream baseline: `vitest run src` reports 14 files and 322 passing tests.
 | `utils/pio-assembler.spec.ts` | `utils/pio_assembler.rs` | 9 | foundation |
 | `utils/fifo.spec.ts` | `utils/fifo.rs` | 3 | foundation |
 | `utils/time.spec.ts` | `utils/time.rs` | 1 | foundation |
-| `instructions.spec.ts` | `cortex_m0_core.rs` | 126 | plan 2 |
-| `rp2040.spec.ts` | `rp2040.rs` | 22 | plan 2 |
+| `instructions.spec.ts` | `cortex_m0_core.rs` | 126 | core |
+| `rp2040.spec.ts` | `rp2040.rs` | 22 | core |
 | `peripherals/clocks.spec.ts` | `peripherals/clocks.rs` | 16 | plan 3 |
 | `peripherals/dma.spec.ts` | `peripherals/dma.rs` | 2 | plan 3 |
 | `peripherals/pio.spec.ts` | `peripherals/pio.rs` | 35 | plan 3 |
@@ -37,6 +37,19 @@ Upstream baseline: `vitest run src` reports 14 files and 322 passing tests.
 `tests/utils.rs`, and `tests/clock.rs`. Non-upstream coverage lives in those
 files so the upstream-ported unit count stays at 322.
 
+## Core status
+
+`cargo test --lib` reports exactly 239 passing tests:
+
+- foundation utilities and opcode encoders — 91
+- `rp2040::tests` — 22
+- `cortex_m0_core::tests` — 126
+
+`cargo test` also passes the integration suites in `tests/smoke.rs`,
+`tests/utils.rs`, `tests/clock.rs`, `tests/core_state.rs`,
+`tests/core_cycles.rs`, and `tests/core_shifts.rs`. APB peripherals other
+than PPB/NVIC are still stubs; Plan 3 replaces them.
+
 ## Count verification note
 
 The 322-case baseline comes from a `vitest run src` execution of the pinned
@@ -56,3 +69,7 @@ The per-file figures above are expanded vitest counts, not counts of textual
 - GDB and Simulator are single-threaded.
 - Emulator state is `Rc`-based and not `Send`/`Sync`.
 - No JavaScript object identity or prototype semantics.
+- SBCS overflow flag for `0x80000000 - 0x7fffffff - 1` with carry-in 0:
+  the Rust port computes the hardware-correct `V=true`, while upstream
+  `substractUpdateFlags` computes `V=false`. No ported test observes this;
+  documented as a source-level deviation.
