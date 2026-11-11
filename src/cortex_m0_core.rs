@@ -640,14 +640,14 @@ impl Core {
             let rn = ((opcode >> 3) & 0x7) as usize;
             let rt = (opcode & 0x7) as usize;
             let addr = self.reg(rn).wrapping_add(imm5);
-            delta_cycles += self.cycles_io(addr);
+            delta_cycles += self.cycles_io(addr, false);
             self.set_reg(rt, bus.read_u32(addr));
         } else if opcode >> 11 == 0b10011 {
             // LDR (sp + immediate)
             let rt = ((opcode >> 8) & 0x7) as usize;
             let imm8 = u32::from(opcode & 0xff) << 2;
             let addr = self.sp().wrapping_add(imm8);
-            delta_cycles += self.cycles_io(addr);
+            delta_cycles += self.cycles_io(addr, false);
             self.set_reg(rt, bus.read_u32(addr));
         } else if opcode >> 11 == 0b01001 {
             // LDR (literal)
@@ -655,7 +655,7 @@ impl Core {
             let rt = ((opcode >> 8) & 0x7) as usize;
             let next_pc = self.pc().wrapping_add(2) & !3;
             let addr = next_pc.wrapping_add(imm8);
-            delta_cycles += self.cycles_io(addr);
+            delta_cycles += self.cycles_io(addr, false);
             self.set_reg(rt, bus.read_u32(addr));
         } else if opcode >> 9 == 0b0101100 {
             // LDR (register)
@@ -663,7 +663,7 @@ impl Core {
             let rn = ((opcode >> 3) & 0x7) as usize;
             let rt = (opcode & 0x7) as usize;
             let addr = self.reg(rm).wrapping_add(self.reg(rn));
-            delta_cycles += self.cycles_io(addr);
+            delta_cycles += self.cycles_io(addr, false);
             self.set_reg(rt, bus.read_u32(addr));
         } else if opcode >> 11 == 0b01111 {
             // LDRB (immediate)
@@ -671,7 +671,7 @@ impl Core {
             let rn = ((opcode >> 3) & 0x7) as usize;
             let rt = (opcode & 0x7) as usize;
             let addr = self.reg(rn).wrapping_add(imm5);
-            delta_cycles += self.cycles_io(addr);
+            delta_cycles += self.cycles_io(addr, false);
             self.set_reg(rt, u32::from(bus.read_u8(addr)));
         } else if opcode >> 9 == 0b0101110 {
             // LDRB (register)
@@ -679,7 +679,7 @@ impl Core {
             let rn = ((opcode >> 3) & 0x7) as usize;
             let rt = (opcode & 0x7) as usize;
             let addr = self.reg(rm).wrapping_add(self.reg(rn));
-            delta_cycles += self.cycles_io(addr);
+            delta_cycles += self.cycles_io(addr, false);
             self.set_reg(rt, u32::from(bus.read_u8(addr)));
         } else if opcode >> 11 == 0b10001 {
             // LDRH (immediate)
@@ -687,7 +687,7 @@ impl Core {
             let rn = ((opcode >> 3) & 0x7) as usize;
             let rt = (opcode & 0x7) as usize;
             let addr = self.reg(rn).wrapping_add(imm5);
-            delta_cycles += self.cycles_io(addr);
+            delta_cycles += self.cycles_io(addr, false);
             self.set_reg(rt, u32::from(bus.read_u16(addr)));
         } else if opcode >> 9 == 0b0101101 {
             // LDRH (register)
@@ -695,7 +695,7 @@ impl Core {
             let rn = ((opcode >> 3) & 0x7) as usize;
             let rt = (opcode & 0x7) as usize;
             let addr = self.reg(rm).wrapping_add(self.reg(rn));
-            delta_cycles += self.cycles_io(addr);
+            delta_cycles += self.cycles_io(addr, false);
             self.set_reg(rt, u32::from(bus.read_u16(addr)));
         } else if opcode >> 9 == 0b0101011 {
             // LDRSB
@@ -703,7 +703,7 @@ impl Core {
             let rn = ((opcode >> 3) & 0x7) as usize;
             let rt = (opcode & 0x7) as usize;
             let addr = self.reg(rm).wrapping_add(self.reg(rn));
-            delta_cycles += self.cycles_io(addr);
+            delta_cycles += self.cycles_io(addr, false);
             self.set_reg(rt, sign_extend_8(u32::from(bus.read_u8(addr))));
         } else if opcode >> 9 == 0b0101111 {
             // LDRSH
@@ -711,7 +711,7 @@ impl Core {
             let rn = ((opcode >> 3) & 0x7) as usize;
             let rt = (opcode & 0x7) as usize;
             let addr = self.reg(rm).wrapping_add(self.reg(rn));
-            delta_cycles += self.cycles_io(addr);
+            delta_cycles += self.cycles_io(addr, false);
             self.set_reg(rt, sign_extend_16(u32::from(bus.read_u16(addr))));
         } else if opcode >> 11 == 0b00000 {
             // LSLS (immediate)
@@ -764,8 +764,8 @@ impl Core {
             let result = if shift < 32 { input >> shift } else { 0 };
             self.set_reg(rdn, result);
             self.set_nz(result);
-            self.set_c(if shift <= 32 && shift != 0 {
-                (input >> (shift - 1)) & 1 != 0
+            self.set_c(if shift <= 32 {
+                (input >> ((shift.wrapping_sub(1)) & 31)) & 1 != 0
             } else {
                 false
             });
@@ -923,14 +923,14 @@ impl Core {
             let rn = ((opcode >> 3) & 0x7) as usize;
             let rt = (opcode & 0x7) as usize;
             let address = self.reg(rn).wrapping_add(imm5);
-            delta_cycles += self.cycles_io(address);
+            delta_cycles += self.cycles_io(address, true);
             bus.write_u32(address, self.reg(rt));
         } else if opcode >> 11 == 0b10010 {
             // STR (sp + immediate)
             let rt = ((opcode >> 8) & 0x7) as usize;
             let imm8 = u32::from(opcode & 0xff) << 2;
             let address = self.sp().wrapping_add(imm8);
-            delta_cycles += self.cycles_io(address);
+            delta_cycles += self.cycles_io(address, true);
             bus.write_u32(address, self.reg(rt));
         } else if opcode >> 9 == 0b0101000 {
             // STR (register)
@@ -938,7 +938,7 @@ impl Core {
             let rn = ((opcode >> 3) & 0x7) as usize;
             let rt = (opcode & 0x7) as usize;
             let address = self.reg(rm).wrapping_add(self.reg(rn));
-            delta_cycles += self.cycles_io(address);
+            delta_cycles += self.cycles_io(address, true);
             bus.write_u32(address, self.reg(rt));
         } else if opcode >> 11 == 0b01110 {
             // STRB (immediate)
@@ -946,7 +946,7 @@ impl Core {
             let rn = ((opcode >> 3) & 0x7) as usize;
             let rt = (opcode & 0x7) as usize;
             let address = self.reg(rn).wrapping_add(imm5);
-            delta_cycles += self.cycles_io(address);
+            delta_cycles += self.cycles_io(address, true);
             bus.write_u8(address, self.reg(rt) as u8);
         } else if opcode >> 9 == 0b0101010 {
             // STRB (register)
@@ -954,7 +954,7 @@ impl Core {
             let rn = ((opcode >> 3) & 0x7) as usize;
             let rt = (opcode & 0x7) as usize;
             let address = self.reg(rm).wrapping_add(self.reg(rn));
-            delta_cycles += self.cycles_io(address);
+            delta_cycles += self.cycles_io(address, true);
             bus.write_u8(address, self.reg(rt) as u8);
         } else if opcode >> 11 == 0b10000 {
             // STRH (immediate)
@@ -962,7 +962,7 @@ impl Core {
             let rn = ((opcode >> 3) & 0x7) as usize;
             let rt = (opcode & 0x7) as usize;
             let address = self.reg(rn).wrapping_add(imm5);
-            delta_cycles += self.cycles_io(address);
+            delta_cycles += self.cycles_io(address, true);
             bus.write_u16(address, self.reg(rt) as u16);
         } else if opcode >> 9 == 0b0101001 {
             // STRH (register)
@@ -970,7 +970,7 @@ impl Core {
             let rn = ((opcode >> 3) & 0x7) as usize;
             let rt = (opcode & 0x7) as usize;
             let address = self.reg(rm).wrapping_add(self.reg(rn));
-            delta_cycles += self.cycles_io(address);
+            delta_cycles += self.cycles_io(address, true);
             bus.write_u16(address, self.reg(rt) as u16);
         } else if opcode >> 7 == 0b101100001 {
             // SUB SP, #imm7
@@ -1093,12 +1093,19 @@ impl Core {
         result
     }
 
-    fn cycles_io(&self, address: u32) -> u32 {
-        if (0x2000_0000..0x2004_2000).contains(&address)
-            || (0x1000_0000..0x1400_0000).contains(&address)
-            || address < 0x1000
+    fn cycles_io(&self, address: u32, write: bool) -> u32 {
+        if (crate::rp2040::SIO_START_ADDRESS..crate::rp2040::SIO_START_ADDRESS + 0x1000_0000)
+            .contains(&address)
         {
             0
+        } else if (crate::rp2040::APB_START_ADDRESS..crate::rp2040::APB_START_ADDRESS + 0x1000_0000)
+            .contains(&address)
+        {
+            if write {
+                4
+            } else {
+                3
+            }
         } else {
             1
         }
@@ -1134,7 +1141,7 @@ impl Core {
 
     fn arithmetic_shift_right(&self, value: u32, shift: u32) -> (u32, bool) {
         if shift == 0 {
-            return (value, self.c());
+            return (value, value & 0x8000_0000 != 0);
         }
         let shift = shift.min(32);
         let carry = if shift >= 32 {
