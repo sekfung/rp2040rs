@@ -147,3 +147,23 @@ fn ring_mode_read_address_wraps_without_panicking() {
 
     assert_eq!(rp.read_u32(CH0_READ_ADDR), 0xffff_fff0);
 }
+
+#[test]
+fn dma_timer_registers_accept_writes_and_aliases() {
+    let rp = Rp2040::new();
+    let timer_offsets = [TIMER0, TIMER0 + 4, TIMER0 + 8, TIMER0 + 12];
+
+    for &offset in &timer_offsets {
+        rp.write_u32(offset, 0x0f0f);
+        assert_eq!(rp.read_u32(offset), 0x0f0f);
+
+        rp.write_u32(offset | 0x2000, 0x00f0);
+        assert_eq!(rp.read_u32(offset), 0x0fff);
+
+        rp.write_u32(offset | 0x3000, 0x000f);
+        assert_eq!(rp.read_u32(offset), 0x0ff0);
+
+        rp.write_u32(offset | 0x1000, 0xffff);
+        assert_eq!(rp.read_u32(offset), 0xf00f);
+    }
+}

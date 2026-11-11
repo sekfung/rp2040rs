@@ -551,7 +551,7 @@ impl Peripheral for Dma {
         };
         match offset {
             TIMER0 | TIMER1 | TIMER2 | TIMER3 => {
-                self.state.borrow_mut().timers[(offset - TIMER0) as usize] = atomic_value;
+                self.state.borrow_mut().timers[((offset - TIMER0) >> 2) as usize] = atomic_value;
             }
             INTR | INTS0 | INTS1 => {
                 self.state.borrow_mut().int_raw &= !value;
