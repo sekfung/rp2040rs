@@ -29,7 +29,16 @@ impl GdbTcpServer {
         loop {
             match self.serve_one(server) {
                 Ok(()) => {}
-                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        std::io::ErrorKind::Interrupted
+                            | std::io::ErrorKind::ConnectionAborted
+                            | std::io::ErrorKind::ConnectionReset
+                    ) =>
+                {
+                    continue;
+                }
                 Err(error) => return Err(error),
             }
         }
@@ -45,16 +54,7 @@ impl GdbTcpServer {
         loop {
             let count = match stream.read(&mut buffer) {
                 Ok(count) => count,
-                Err(error)
-                    if matches!(
-                        error.kind(),
-                        std::io::ErrorKind::ConnectionReset
-                            | std::io::ErrorKind::BrokenPipe
-                            | std::io::ErrorKind::UnexpectedEof
-                    ) =>
-                {
-                    return Ok(());
-                }
+                Err(error) if is_disconnect(&error) => return Ok(()),
                 Err(error) => return Err(error),
             };
             if count == 0 {
@@ -62,9 +62,30 @@ impl GdbTcpServer {
             }
             let data = String::from_utf8_lossy(&buffer[..count]);
             for response in connection.feed_data(&data, server) {
-                stream.write_all(response.as_bytes())?;
+                if let Err(error) = stream.write_all(response.as_bytes()) {
+                    if is_disconnect(&error) {
+                        return Ok(());
+                    }
+                    return Err(error);
+                }
             }
-            stream.flush()?;
+            if let Err(error) = stream.flush() {
+                if is_disconnect(&error) {
+                    return Ok(());
+                }
+                return Err(error);
+            }
         }
     }
+}
+
+fn is_disconnect(error: &std::io::Error) -> bool {
+    matches!(
+        error.kind(),
+        std::io::ErrorKind::ConnectionReset
+            | std::io::ErrorKind::ConnectionAborted
+            | std::io::ErrorKind::BrokenPipe
+            | std::io::ErrorKind::UnexpectedEof
+            | std::io::ErrorKind::NotConnected
+    )
 }

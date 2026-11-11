@@ -41,7 +41,7 @@ use rp2040rs::{Rp2040};
 
 let rp = Rp2040::new();
 rp.uart[0].set_on_byte(Box::new(|byte| print!("{}", byte as char)));
-rp.gpio[25].set_output(true, true); // drive GPIO25 high through the SIO function
+rp.write_u32(0x4001_40cc, 5); // IO_BANK0 GPIO25_CTRL: FUNCSEL = SIO
 rp.write_u32(0xd000_0024, 1 << 25); // SIO GPIO_OE_SET
 rp.write_u32(0xd000_0014, 1 << 25); // SIO GPIO_OUT_SET
 ```
