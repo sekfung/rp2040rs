@@ -3,6 +3,7 @@ use std::collections::BTreeMap;
 use std::rc::Rc;
 
 use crate::cortex_m0_core::Core;
+use crate::gpio_pin::GpioPin;
 use crate::peripherals::clocks::Clocks;
 use crate::peripherals::pll::Pll;
 use crate::peripherals::ppb::Ppb;
@@ -10,6 +11,7 @@ use crate::peripherals::pwm::Pwm;
 use crate::peripherals::uart::Uart;
 use crate::peripherals::xosc::Xosc;
 use crate::peripherals::{BasePeripheral, Peripheral};
+use crate::sio::Sio;
 use crate::utils::logging::{ConsoleLogger, LogLevel, Logger};
 
 pub const FLASH_START_ADDRESS: u32 = 0x1000_0000;
@@ -127,6 +129,9 @@ pub struct BoardShared {
     pub xosc: Option<Xosc>,
     pub pwm: Option<Pwm>,
     pub uart: [Option<Uart>; 2],
+    pub sio: Option<Sio>,
+    pub gpio: [GpioPin; 30],
+    pub qspi: [GpioPin; 6],
 }
 
 #[derive(Clone)]
@@ -144,6 +149,9 @@ pub struct Rp2040 {
     pub xosc: Xosc,
     pub pwm: Pwm,
     pub uart: [Uart; 2],
+    pub sio: Sio,
+    pub gpio: [GpioPin; 30],
+    pub qspi: [GpioPin; 6],
 }
 
 impl Rp2040 {
@@ -152,6 +160,8 @@ impl Rp2040 {
         let sram = Memory::new(SRAM_SIZE);
         let flash = Memory::new(FLASH_SIZE);
         let usb_dpram = Memory::new(USB_DPRAM_SIZE);
+        let gpio = std::array::from_fn(GpioPin::new);
+        let qspi = std::array::from_fn(GpioPin::new);
         let shared = Rc::new(RefCell::new(BoardShared {
             logger: Rc::new(RefCell::new(Box::new(ConsoleLogger::new(
                 LogLevel::Debug,
@@ -176,6 +186,9 @@ impl Rp2040 {
             xosc: None,
             pwm: None,
             uart: [None, None],
+            sio: None,
+            gpio: gpio.clone(),
+            qspi: qspi.clone(),
         }));
         let core = Core::new(Rc::downgrade(&shared));
         let ppb = Ppb::new(core.clone());
@@ -189,6 +202,7 @@ impl Rp2040 {
             Uart::new("UART0", weak.clone()),
             Uart::new("UART1", weak.clone()),
         ];
+        let sio = Sio::new(core.clone(), weak.clone());
         {
             let mut board = shared.borrow_mut();
             board.ppb = Some(ppb.clone());
@@ -198,6 +212,7 @@ impl Rp2040 {
             board.xosc = Some(xosc.clone());
             board.pwm = Some(pwm.clone());
             board.uart = [Some(uart[0].clone()), Some(uart[1].clone())];
+            board.sio = Some(sio.clone());
         }
         let rp2040 = Self {
             shared: shared.clone(),
@@ -213,6 +228,9 @@ impl Rp2040 {
             xosc,
             pwm,
             uart,
+            sio,
+            gpio,
+            qspi,
         };
         rp2040.register_stubs();
         rp2040.register_real_peripherals();
@@ -311,6 +329,21 @@ impl Rp2040 {
 
     pub fn clk_peri(&self) -> f64 {
         self.shared.borrow().clk_peri
+    }
+
+    pub fn gpio_values(&self) -> u32 {
+        self.shared
+            .borrow()
+            .gpio
+            .iter()
+            .enumerate()
+            .fold(0, |acc, (index, pin)| {
+                if pin.input_value() {
+                    acc | (1 << index)
+                } else {
+                    acc
+                }
+            })
     }
 
     pub fn set_xosc_freq(&self, frequency: f64) {
@@ -533,8 +566,11 @@ impl Bus {
                 return ppb.read_u32(address & 0xfff);
             }
         } else if (SIO_START_ADDRESS..SIO_START_ADDRESS + 0x1000_0000).contains(&address) {
+            let sio = board.sio.clone();
             drop(board);
-            return 0xffff_ffff;
+            return sio
+                .map(|sio| sio.read_u32(address - SIO_START_ADDRESS))
+                .unwrap_or(0xffff_ffff);
         }
         drop(board);
         if let Some(peripheral) = self.find_peripheral(address) {
@@ -619,7 +655,11 @@ impl Bus {
                 .usb_dpram
                 .write_u32((address - DPRAM_START_ADDRESS) as usize, value);
         } else if (SIO_START_ADDRESS..SIO_START_ADDRESS + 0x1000_0000).contains(&address) {
-            // SIO is implemented in Plan 3.
+            let sio = board.sio.clone();
+            drop(board);
+            if let Some(sio) = sio {
+                sio.write_u32(address - SIO_START_ADDRESS, value);
+            }
         } else if address >> 12 == 0xe000e {
             if let Some(ppb) = board.ppb.clone() {
                 drop(board);
