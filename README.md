@@ -34,6 +34,20 @@ cargo run --release -- --image firmware.hex --expect-text "hello"
 The CLI loads the embedded B1 bootrom, flashes the image at `0x10000000`, sets
 PC, forwards UART0 bytes to stdout, and exposes an optional blocking GDB server.
 
+## Minimal library usage
+
+```rust
+use rp2040rs::{Rp2040};
+
+let rp = Rp2040::new();
+rp.uart[0].set_on_byte(Box::new(|byte| print!("{}", byte as char)));
+rp.gpio[25].set_output(true, true); // drive GPIO25 high through the SIO function
+rp.write_u32(0xd000_0024, 1 << 25); // SIO GPIO_OE_SET
+rp.write_u32(0xd000_0014, 1 << 25); // SIO GPIO_OUT_SET
+```
+
+See `docs/parity.md` for the complete API/export map and documented deviations.
+
 ## License
 
 MIT. See `LICENSE` and `NOTICE`.

@@ -1,20 +1,23 @@
 use std::cell::Cell;
 use std::rc::Rc;
 
-use crate::clock::SimulationClock;
+use crate::clock::{Clock, SimulationClock};
 use crate::gdb::target::GdbTarget;
 use crate::rp2040::Rp2040;
 
 pub struct Simulator {
     pub rp2040: Rp2040,
-    clock: Rc<SimulationClock>,
+    clock: Rc<dyn Clock>,
     stopped: bool,
     break_flag: Rc<Cell<bool>>,
 }
 
 impl Simulator {
     pub fn new() -> Self {
-        let clock = Rc::new(SimulationClock::new());
+        Self::with_clock(Rc::new(SimulationClock::new()))
+    }
+
+    pub fn with_clock(clock: Rc<dyn Clock>) -> Self {
         let rp2040 = Rp2040::with_clock(clock.clone());
         let break_flag = Rc::new(Cell::new(false));
         let flag = break_flag.clone();
@@ -31,6 +34,20 @@ impl Simulator {
         self.execute_steps(1_000_000);
     }
 
+    /// Execute up to four synchronous batches and leave the target stopped.
+    pub fn run_until_stop(&mut self) {
+        for _ in 0..4 {
+            self.execute_once();
+            if self.last_break() {
+                break;
+            }
+        }
+    }
+
+    pub fn clock(&self) -> Rc<dyn Clock> {
+        self.clock.clone()
+    }
+
     /// Execute at most `limit` instructions and leave the target stopped.
     pub fn execute_steps(&mut self, limit: usize) {
         self.stopped = false;
@@ -41,11 +58,10 @@ impl Simulator {
                 break;
             }
             if self.rp2040.core.waiting() {
-                let nanos = self.clock.nanos_to_next_alarm();
-                if nanos <= 0.0 {
-                    break;
+                match self.clock.nanos_to_next_alarm() {
+                    Some(nanos) => self.clock.tick(nanos.max(0.0)),
+                    None => break,
                 }
-                self.clock.tick(nanos);
             } else {
                 let cycles = self.rp2040.execute_instruction();
                 self.clock.tick(cycles as f64 * cycle_nanos);

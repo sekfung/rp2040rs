@@ -97,6 +97,9 @@ impl GdbServer {
                     let prefix = if end < TARGET_XML.len() { 'm' } else { 'l' };
                     return Some(format!("{prefix}{}", &TARGET_XML[start..end]));
                 }
+                if cmd == "qXfer:features:read:target.xml" {
+                    return Some(format!("l{TARGET_XML}"));
+                }
                 if cmd.starts_with("qRegisterInfo") {
                     let index = usize::from_str_radix(cmd.get(13..).unwrap_or(""), 16).ok();
                     return Some(match index.and_then(|i| REGISTER_INFO.get(i)) {
@@ -117,7 +120,8 @@ impl GdbServer {
                     return Some("vCont;c;C;s;S".into());
                 }
                 if cmd.starts_with("vCont;c") || cmd.starts_with("vCont;C") {
-                    return self.continue_target().then(|| STOP_REPLY_TRAP.to_string());
+                    let hit_break = self.continue_target();
+                    return Some(if hit_break { STOP_REPLY_TRAP } else { "OK" }.to_string());
                 }
                 if cmd.starts_with("vCont;s") || cmd.starts_with("vCont;S") {
                     self.target.step();
@@ -125,7 +129,10 @@ impl GdbServer {
                 }
                 Some(String::new())
             }
-            'c' => self.continue_target().then(|| STOP_REPLY_TRAP.to_string()),
+            'c' => {
+                let hit_break = self.continue_target();
+                Some(if hit_break { STOP_REPLY_TRAP } else { "OK" }.to_string())
+            }
             's' => {
                 self.target.step();
                 Some(self.step_reply())
@@ -218,7 +225,7 @@ impl GdbServer {
         // A synchronous GDB target runs in bounded batches. Keep executing
         // until an actual BKPT or an explicit stop; a batch boundary alone is
         // not a stop event and must not be reported as SIGTRAP.
-        const MAX_BATCHES: usize = 4;
+        const MAX_BATCHES: usize = 1;
         for _ in 0..MAX_BATCHES {
             self.target.execute();
             if self.target.last_break() {

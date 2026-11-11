@@ -12,9 +12,8 @@ pub type AlarmCallback = Box<dyn FnMut()>;
 pub trait Clock: 'static {
     fn nanos(&self) -> f64;
     fn create_alarm(&self, callback: AlarmCallback) -> Alarm;
-    fn nanos_to_next_alarm(&self) -> f64 {
-        0.0
-    }
+    fn tick(&self, delta_nanos: f64);
+    fn nanos_to_next_alarm(&self) -> Option<f64>;
 }
 
 #[derive(Clone)]

@@ -94,6 +94,23 @@ Implemented beyond the upstream unit-test surface:
 The crate root re-exports every `src/index.ts` symbol; `tests/exports.rs`
 enforces this at compile time.
 
+## Public export map
+
+| `src/index.ts` export | Rust crate-root name |
+|---|---|
+| `GDBConnection`, `GDBServer` | `GdbConnection`, `GdbServer` |
+| `GPIOPin`, `GPIOPinState` | `GpioPin`, `GpioPinState` |
+| `I2CMode`, `I2CSpeed`, `RPI2C` | `I2cMode`, `I2cSpeed`, `I2c` |
+| `BasePeripheral`, `Peripheral` | `BasePeripheral`, `Peripheral` |
+| `RPPIO`, `StateMachine` | `Pio`, `StateMachine` |
+| `RPUSBController` | `UsbController` |
+| `RP2040`, `ClockListener` | `Rp2040`, `ClockListener` |
+| `Simulator` | `Simulator` |
+| `USBCDC` | `UsbCdc` |
+| USB interface/setup symbols | `DataDirection`, `DescriptorType`, `SetupRecipient`, `SetupRequest`, `SetupType`, `ISetupPacketParams`, `createSetupPacket`, `getDescriptorPacket`, `setDeviceAddressPacket`, `setDeviceConfigurationPacket` |
+| USB device symbols | `StandardRequest`, `UsbDescriptorType`, `parseSetupPacket`, `UsbDevice`, `UsbTransferResult`, `UsbTransferStatus` |
+| `FIFO`, `ConsoleLogger`, `LogLevel`, `Logger` | `Fifo`, `ConsoleLogger`, `LogLevel`, `Logger` |
+
 ## Count verification note
 
 The 322-case baseline comes from a `vitest run src` execution of the pinned
@@ -140,3 +157,8 @@ The per-file figures above are expanded vitest counts, not counts of textual
 - TREQ_TIMER3 uses hardware-correct bits 16-31; upstream's 36-bit shift is a
   source-level bug and is not copied.
 - `set_logger` called from inside a logger callback is unsupported.
+- RTC date/time reads use UTC from the simulated wall clock; upstream uses the
+  host-local `Date` getters. This affects displayed RTC values only.
+- GDB `continue` is synchronous: it executes one bounded 1,000,000-instruction
+  batch and returns `OK` when no breakpoint fires, or `S05` when a BKPT stops
+  the target. Upstream returns `OK` immediately and continues asynchronously.

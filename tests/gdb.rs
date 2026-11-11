@@ -65,12 +65,10 @@ fn steps_continues_and_reports_break() {
 #[test]
 fn continue_without_break_does_not_report_trap() {
     let (mut gdb, rp2040) = server_with_rp();
-    for offset in (0..32).step_by(2) {
-        rp2040.write_u16(0x2000_0000 + offset, 0xbf00); // NOP x16
-    }
+    rp2040.write_u16(0x2000_0000, 0xe7fe); // b .
     rp2040.core.set_pc(0x2000_0000);
     let reply = gdb.process_message("c");
-    assert!(reply.as_deref() != Some("S05"), "false SIGTRAP: {reply:?}");
+    assert_eq!(reply.as_deref(), Some("OK"), "false SIGTRAP: {reply:?}");
 }
 
 #[test]
@@ -138,22 +136,36 @@ fn query_commands_return_expected_packets() {
 }
 
 #[test]
+#[ignore = "requires loopback bind"]
 fn tcp_server_completes_one_handshake() {
-    let Ok(tcp) = GdbTcpServer::bind(0) else {
-        return;
-    };
+    let tcp = GdbTcpServer::bind(0).expect("bind loopback GDB listener");
     let server_addr = tcp.local_addr().unwrap();
     let client = thread::spawn(move || {
         let mut stream = TcpStream::connect(server_addr).expect("connect to gdb server");
         stream.write_all(b"$?#3f").unwrap();
-        let mut response = [0u8; 64];
-        let count = stream.read(&mut response).unwrap();
-        String::from_utf8_lossy(&response[..count]).into_owned()
+        let mut response = String::new();
+        let mut buffer = [0u8; 64];
+        while !response.contains("$S05#b8") {
+            let count = stream.read(&mut buffer).expect("read gdb response");
+            assert!(count > 0, "server closed before stop reply: {response:?}");
+            response.push_str(&String::from_utf8_lossy(&buffer[..count]));
+        }
+        response
     });
     let mut gdb = server();
     tcp.serve_one(&mut gdb).expect("serve one gdb connection");
     let response = client.join().unwrap();
     assert!(response.contains("+$S05#b8"), "response was {response:?}");
+}
+
+#[test]
+fn qxfer_without_range_returns_full_xml() {
+    let mut gdb = server();
+    let xml = gdb
+        .process_message("qXfer:features:read:target.xml")
+        .unwrap();
+    assert!(xml.starts_with('l'));
+    assert!(xml.contains("<architecture>arm</architecture>"));
 }
 
 #[test]

@@ -138,7 +138,11 @@ fn main() {
                 process::exit(1);
             }
         };
-        eprintln!("rp2040rs GDB server listening on port {}", options.port);
+        let bound_port = server
+            .local_addr()
+            .map(|address| address.port())
+            .unwrap_or(options.port);
+        eprintln!("rp2040rs GDB server listening on port {bound_port}");
         let mut gdb_server = GdbServer::new(Box::new(simulator));
         if let Err(error) = server.serve(&mut gdb_server) {
             eprintln!("rp2040rs: GDB server error: {error}");

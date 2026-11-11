@@ -27,9 +27,10 @@ impl GdbTcpServer {
 
     pub fn serve(&self, server: &mut GdbServer) -> std::io::Result<()> {
         loop {
-            if self.serve_one(server).is_err() {
-                // A single client connection failing must not stop the server.
-                continue;
+            match self.serve_one(server) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(error) => return Err(error),
             }
         }
     }
@@ -42,7 +43,20 @@ impl GdbTcpServer {
         let mut connection = GdbConnection::new();
         let mut buffer = [0u8; 1024];
         loop {
-            let count = stream.read(&mut buffer)?;
+            let count = match stream.read(&mut buffer) {
+                Ok(count) => count,
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        std::io::ErrorKind::ConnectionReset
+                            | std::io::ErrorKind::BrokenPipe
+                            | std::io::ErrorKind::UnexpectedEof
+                    ) =>
+                {
+                    return Ok(());
+                }
+                Err(error) => return Err(error),
+            };
             if count == 0 {
                 return Ok(());
             }

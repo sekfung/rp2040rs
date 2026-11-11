@@ -71,7 +71,7 @@ impl SimulationClock {
         self.state.borrow_mut().nanos = target;
     }
 
-    pub fn nanos_to_next_alarm(&self) -> f64 {
+    pub fn nanos_to_next_alarm(&self) -> Option<f64> {
         let state = self.state.borrow();
         let next = state
             .alarms
@@ -80,9 +80,9 @@ impl SimulationClock {
             .map(|entry| entry.due - state.nanos)
             .fold(f64::INFINITY, f64::min);
         if next.is_finite() {
-            next.max(0.0)
+            Some(next)
         } else {
-            0.0
+            None
         }
     }
 }
@@ -117,7 +117,11 @@ impl Clock for SimulationClock {
         }
     }
 
-    fn nanos_to_next_alarm(&self) -> f64 {
+    fn tick(&self, delta_nanos: f64) {
+        SimulationClock::tick(self, delta_nanos);
+    }
+
+    fn nanos_to_next_alarm(&self) -> Option<f64> {
         SimulationClock::nanos_to_next_alarm(self)
     }
 }

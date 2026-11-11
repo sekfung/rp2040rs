@@ -31,7 +31,11 @@ impl Clock for MockClock {
         self.inner.create_alarm(callback)
     }
 
-    fn nanos_to_next_alarm(&self) -> f64 {
+    fn tick(&self, delta_nanos: f64) {
+        self.inner.tick(delta_nanos);
+    }
+
+    fn nanos_to_next_alarm(&self) -> Option<f64> {
         self.inner.nanos_to_next_alarm()
     }
 }
