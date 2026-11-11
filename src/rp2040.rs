@@ -44,7 +44,8 @@ pub type ClockListenerId = u64;
 pub type ClockListener = Box<dyn FnMut(f64, f64)>;
 type ClockListenerSlot = Rc<RefCell<Option<ClockListener>>>;
 
-const BOOTROM_SIZE: usize = 4 * 1024;
+// Upstream models the bootrom as `Uint32Array(4 * KB)`: 4096 words = 16 KiB.
+const BOOTROM_SIZE: usize = 16 * 1024;
 const SRAM_SIZE: usize = 264 * 1024;
 const FLASH_SIZE: usize = 16 * 1024 * 1024;
 const USB_DPRAM_SIZE: usize = 4 * 1024;
