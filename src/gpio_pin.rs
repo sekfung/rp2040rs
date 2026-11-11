@@ -1,4 +1,5 @@
 use std::cell::Cell;
+use std::rc::Rc;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum GpioPinState {
@@ -17,14 +18,14 @@ pub enum GpioPinState {
 #[derive(Clone, Debug)]
 pub struct GpioPin {
     index: usize,
-    input_value: Cell<bool>,
+    input_value: Rc<Cell<bool>>,
 }
 
 impl GpioPin {
     pub fn new(index: usize) -> Self {
         Self {
             index,
-            input_value: Cell::new(false),
+            input_value: Rc::new(Cell::new(false)),
         }
     }
 

@@ -1,6 +1,7 @@
 use std::cell::RefCell;
 use std::rc::{Rc, Weak};
 
+use crate::clock::Alarm;
 use crate::peripherals::{atomic_update, Peripheral};
 use crate::rp2040::BoardShared;
 use crate::utils::Fifo;
@@ -149,6 +150,7 @@ struct PioState {
     irq0_int_force: u32,
     irq1_int_enable: u32,
     irq1_int_force: u32,
+    running: bool,
 }
 
 impl PioState {
@@ -174,6 +176,7 @@ impl PioState {
             irq0_int_force: 0,
             irq1_int_enable: 0,
             irq1_int_force: 0,
+            running: false,
         }
     }
 
@@ -199,6 +202,7 @@ pub struct Pio {
     name: &'static str,
     first_irq: u32,
     index: usize,
+    alarm: Rc<RefCell<Option<Alarm>>>,
 }
 
 impl Pio {
@@ -208,12 +212,36 @@ impl Pio {
         index: usize,
         board: Weak<RefCell<BoardShared>>,
     ) -> Self {
+        let state = Rc::new(RefCell::new(PioState::new()));
+        let alarm = Rc::new(RefCell::new(None));
+        if let Some(board_rc) = board.upgrade() {
+            let clock = board_rc.borrow().clock.clone();
+            let weak_state = Rc::downgrade(&state);
+            let weak_board = board.clone();
+            let alarm_slot = alarm.clone();
+            let alarm_handle = clock.create_alarm(Box::new(move || {
+                if let (Some(state), Some(board_rc)) = (weak_state.upgrade(), weak_board.upgrade())
+                {
+                    let pio = Pio {
+                        state,
+                        board: Rc::downgrade(&board_rc),
+                        name,
+                        first_irq,
+                        index,
+                        alarm: alarm_slot.clone(),
+                    };
+                    pio.run_burst();
+                }
+            }));
+            *alarm.borrow_mut() = Some(alarm_handle);
+        }
         Self {
-            state: Rc::new(RefCell::new(PioState::new())),
+            state,
             board,
             name,
             first_irq,
             index,
+            alarm,
         }
     }
 
@@ -516,6 +544,7 @@ impl Pio {
                 if !state.machines[index].tx_fifo.empty() {
                     state.machines[index].output_shift_reg = state.machines[index].tx_fifo.pull();
                     state.machines[index].waiting = false;
+                    self.update_interrupts(state);
                 }
             }
             WaitType::Out => {
@@ -524,6 +553,7 @@ impl Pio {
                     state.machines[index].output_shift_reg = value;
                     self.out_instruction(state, index, wait_index);
                     state.machines[index].waiting = false;
+                    self.update_interrupts(state);
                 }
             }
             WaitType::None => {}
@@ -598,8 +628,6 @@ impl Pio {
                     if !state.machines[index].rx_fifo.full() {
                         let value = state.machines[index].input_shift_reg;
                         state.machines[index].rx_fifo.push(value);
-                        state.machines[index].input_shift_count = 0;
-                        state.machines[index].input_shift_reg = 0;
                         self.update_interrupts(state);
                     } else {
                         state.rx_stall |= FDEBUG_RXSTALL << index;
@@ -607,6 +635,8 @@ impl Pio {
                         let value = state.machines[index].input_shift_reg;
                         Self::wait(state, index, WaitType::RxFifo, false, value);
                     }
+                    state.machines[index].input_shift_count = 0;
+                    state.machines[index].input_shift_reg = 0;
                 }
             }
             0b011 => {
@@ -898,10 +928,45 @@ impl Pio {
         self.check_changed_pins();
     }
 
+    fn burst_delay_nanos(&self) -> f64 {
+        let clk_sys = self
+            .board()
+            .map(|board| board.borrow().clk_sys)
+            .unwrap_or(125_000_000.0);
+        if clk_sys > 0.0 {
+            1000.0 * 1e9 / clk_sys
+        } else {
+            8000.0
+        }
+    }
+
+    fn run_burst(&self) {
+        for _ in 0..1000 {
+            self.step();
+        }
+        let running = self
+            .state
+            .borrow()
+            .machines
+            .iter()
+            .any(|machine| machine.enabled);
+        self.state.borrow_mut().running = running;
+        if running {
+            if let Some(alarm) = self.alarm.borrow_mut().as_mut() {
+                alarm.schedule(self.burst_delay_nanos());
+            }
+        }
+    }
+
     pub fn stop(&self) {
         let mut state = self.state.borrow_mut();
         for machine in &mut state.machines {
             machine.enabled = false;
+        }
+        state.running = false;
+        drop(state);
+        if let Some(alarm) = self.alarm.borrow_mut().as_mut() {
+            alarm.cancel();
         }
     }
 
@@ -972,6 +1037,7 @@ impl Pio {
         let mut state = self.state.borrow_mut();
         match offset {
             CTRL => {
+                let was_running = state.machines.iter().any(|machine| machine.enabled);
                 let should_run = value & 0xf != 0;
                 for index in 0..4 {
                     state.machines[index].enabled = value & (1 << index) != 0;
@@ -979,10 +1045,14 @@ impl Pio {
                         state.machines[index].restart();
                     }
                 }
+                let now_running = state.machines.iter().any(|machine| machine.enabled);
+                state.running = now_running;
                 drop(state);
-                if should_run {
-                    for _ in 0..1000 {
-                        self.step();
+                if now_running && !was_running && should_run {
+                    self.run_burst();
+                } else if !now_running {
+                    if let Some(alarm) = self.alarm.borrow_mut().as_mut() {
+                        alarm.cancel();
                     }
                 }
             }
