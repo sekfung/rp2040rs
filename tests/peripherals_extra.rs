@@ -327,6 +327,39 @@ fn i2c_master_callbacks_drive_write_read_and_stop() {
 }
 
 #[test]
+fn i2c_callback_can_queue_a_chained_read() {
+    let rp = Rp2040::new();
+    let i2c = rp.i2c[0].clone();
+    let reads = Rc::new(Cell::new(0u32));
+    let reads_cb = reads.clone();
+    let i2c_cb = i2c.clone();
+    i2c.set_on_connect(Box::new(|_addr, _read| true));
+    i2c.set_on_read(Box::new(move || {
+        let n = reads_cb.get();
+        reads_cb.set(n + 1);
+        if n == 0 {
+            i2c_cb.write_u32_atomic(0x10, 1 << 8, 0);
+            0x11
+        } else {
+            0x22
+        }
+    }));
+
+    rp.write_u32(I2C_INTR_MASK, 0xffff);
+    rp.write_u32(I2C_ENABLE, 1);
+    rp.write_u32(I2C_DATA_CMD, (1 << 8) | (1 << 9));
+
+    assert_eq!(reads.get(), 2);
+    assert_eq!(rp.read_u32(I2C_RXFLR), 2);
+    let first = rp.read_u32(I2C_DATA_CMD);
+    let second = rp.read_u32(I2C_DATA_CMD);
+    assert_eq!(first & 0xff, 0x11);
+    assert_eq!(second & 0xff, 0x22);
+    assert_eq!(first & (1 << 10), 1 << 10);
+    assert_eq!(second & (1 << 10), 1 << 10);
+}
+
+#[test]
 fn spi_interrupt_deasserts_when_fifo_status_clears() {
     let rp = Rp2040::new();
     rp.write_u32(SPI_IMSC, 1 << 3);
