@@ -7,12 +7,14 @@ use super::{Alarm, AlarmCallback, Clock};
 pub(crate) struct ClockState {
     pub(crate) nanos: f64,
     pub(crate) next_id: u64,
+    pub(crate) next_order: u64,
     pub(crate) alarms: BTreeMap<u64, AlarmEntry>,
     pub(crate) callbacks: BTreeMap<u64, Rc<RefCell<AlarmCallback>>>,
 }
 
 pub(crate) struct AlarmEntry {
     pub(crate) due: f64,
+    pub(crate) order: u64,
     pub(crate) scheduled: bool,
 }
 
@@ -27,6 +29,7 @@ impl SimulationClock {
             state: Rc::new(RefCell::new(ClockState {
                 nanos: 0.0,
                 next_id: 0,
+                next_order: 0,
                 alarms: BTreeMap::new(),
                 callbacks: BTreeMap::new(),
             })),
@@ -42,11 +45,11 @@ impl SimulationClock {
                     .alarms
                     .iter()
                     .filter(|(_, entry)| entry.scheduled && entry.due <= target)
-                    .min_by(|(id_a, a), (id_b, b)| {
+                    .min_by(|(_, a), (_, b)| {
                         a.due
                             .partial_cmp(&b.due)
                             .unwrap_or(std::cmp::Ordering::Equal)
-                            .then_with(|| id_b.cmp(id_a))
+                            .then_with(|| b.order.cmp(&a.order))
                     })
                     .map(|(id, _)| *id)
             };
@@ -103,6 +106,7 @@ impl Clock for SimulationClock {
             id,
             AlarmEntry {
                 due: 0.0,
+                order: 0,
                 scheduled: false,
             },
         );
@@ -117,8 +121,11 @@ impl Clock for SimulationClock {
 pub(crate) fn schedule_alarm(clock: &Rc<RefCell<ClockState>>, id: u64, delta_nanos: f64) {
     let mut state = clock.borrow_mut();
     let nanos = state.nanos;
+    let order = state.next_order;
+    state.next_order += 1;
     if let Some(entry) = state.alarms.get_mut(&id) {
         entry.due = nanos + delta_nanos;
+        entry.order = order;
         entry.scheduled = true;
     }
 }

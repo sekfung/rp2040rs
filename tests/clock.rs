@@ -31,11 +31,29 @@ fn equal_due_alarms_fire_newest_first() {
     let second = fired.clone();
     let mut alarm_b = clock.create_alarm(Box::new(move || second.borrow_mut().push("b")));
 
-    alarm_a.schedule(10.0);
     alarm_b.schedule(10.0);
+    alarm_a.schedule(10.0);
     clock.tick(10.0);
 
-    assert_eq!(*fired.borrow(), vec!["b", "a"]);
+    assert_eq!(*fired.borrow(), vec!["a", "b"]);
+}
+
+#[test]
+fn rescheduling_to_equal_due_moves_alarm_before_existing() {
+    let clock = SimulationClock::new();
+    let fired = Rc::new(RefCell::new(Vec::new()));
+
+    let first = fired.clone();
+    let mut alarm_a = clock.create_alarm(Box::new(move || first.borrow_mut().push("a")));
+    let second = fired.clone();
+    let mut alarm_b = clock.create_alarm(Box::new(move || second.borrow_mut().push("b")));
+
+    alarm_a.schedule(10.0);
+    alarm_b.schedule(10.0);
+    alarm_a.schedule(10.0);
+    clock.tick(10.0);
+
+    assert_eq!(*fired.borrow(), vec!["a", "b"]);
 }
 
 #[test]
