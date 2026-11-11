@@ -15,6 +15,49 @@ fn cdc_constructs_and_queues_serial_bytes() {
 }
 
 #[test]
+fn host_mode_connect_sets_full_speed_and_conn_dis() {
+    let rp = Rp2040::new();
+    rp.write_u32(0x5011_0040, 3); // CONTROLLER_EN | HOST_NDEVICE
+    rp.usb_ctrl.connect_device();
+
+    assert_ne!(rp.read_u32(0x5011_008c) & 1, 0);
+    let sie = rp.read_u32(0x5011_0050);
+    assert_eq!(sie & (0x3 << 8), 2 << 8);
+    assert_eq!(rp.read_u32(0x5011_008c) & 1, 0);
+}
+
+#[test]
+fn host_sof_increments_frame_and_raises_interrupt() {
+    let clock = Rc::new(MockClock::new());
+    let rp = Rp2040::with_clock(clock.clone());
+    rp.write_u32(0x5011_0040, 3);
+    rp.write_u32(0x5011_004c, 1 << 9); // SOF_EN
+    clock.advance(1000);
+    assert_eq!(rp.read_u32(0x5011_0048), 1);
+    assert_ne!(rp.read_u32(0x5011_008c) & (1 << 2), 0);
+    clock.advance(1000);
+    assert_eq!(rp.read_u32(0x5011_0048), 2);
+}
+
+#[test]
+fn host_transaction_completes_or_times_out() {
+    let clock = Rc::new(MockClock::new());
+    let rp = Rp2040::with_clock(clock.clone());
+    rp.write_u32(0x5011_0040, 3);
+    rp.write_u32(0x5011_004c, 1); // START_TRANS
+    clock.advance(5);
+    assert_ne!(rp.read_u32(0x5011_0050) & (1 << 27), 0); // RX_TIMEOUT
+
+    rp.usb_ctrl.connect_device();
+    rp.write_u32(0x5011_0050, (1 << 27) | (1 << 18) | (1 << 30));
+    rp.write_u32(0x5011_004c, 1);
+    clock.advance(5);
+    let sie = rp.read_u32(0x5011_0050);
+    assert_ne!(sie & (1 << 18), 0); // TRANS_COMPLETE
+    assert_ne!(sie & (1 << 30), 0); // ACK_REC
+}
+
+#[test]
 fn main_ctrl_write_fires_enable_without_touching_dpram() {
     let rp = Rp2040::new();
     let enabled = Rc::new(Cell::new(false));

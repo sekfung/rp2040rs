@@ -138,12 +138,12 @@ The per-file figures above are expanded vitest counts, not counts of textual
   IO_BANK0 FUNCSEL. PIO `FJOIN_TX`, the full eight-entry shared FIFO, and
   per-SM `SM_CLKDIV`/`CLKDIV_RESTART` pacing remain simplified; upstream has
   the same gaps and no ported test asserts them.
-- USB host-mode SOF/host-transaction alarms, host SIE_STATUS mapping, and host
-  device-connected events remain deferred; device-mode CDC and controller
-  paths are implemented. Device-mode SIE mapping covers 4 of upstream's 12
-  SIE bits.
-- PWM polarity inversion, `DIVMODE` gating, and phase-correct/compare-output
-  edge cases remain simplified; free-running counter, `CHn_DIV`, double
+- USB host mode implements SOF generation, host transaction ACK/timeout,
+  host SIE_STATUS/interrupt mapping and device-connected events. Full USBDevice
+  packet-level host transaction modeling and all 12 device SIE mappings remain
+  simplified; device-mode CDC/controller paths are implemented.
+- PWM polarity inversion, `DIVMODE` gating, phase-correct/ZigZag counting, and
+  compare-output edges are implemented; free-running counter, `CHn_DIV`, double
   buffering, wrap DREQ, and GPIO A/B output are implemented.
 - UART modem/flow-control, FIFO thresholds, and overrun/error flags remain
   simplified; the full data/status/control/interrupt/identity register set,

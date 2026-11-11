@@ -45,6 +45,18 @@ const SIE_LINE_STATE_MASK: u32 = 0x3;
 const SIE_LINE_STATE_SHIFT: u32 = 2;
 const SIE_J_STATE: u32 = 1;
 const SIE_WRITECLEAR_MASK: u32 = 0xff0f_0800;
+const SIE_CTRL_SOF_EN: u32 = 1 << 9;
+const SIE_CTRL_RESET_BUS: u32 = 1 << 13;
+const SIE_CTRL_START_TRANS: u32 = 1 << 0;
+const SIE_SPEED_MASK: u32 = 0x3 << 8;
+const SIE_SPEED_FS: u32 = 2 << 8;
+const SIE_ACK_REC: u32 = 1 << 30;
+const SIE_STALL_REC: u32 = 1 << 29;
+const SIE_RX_TIMEOUT: u32 = 1 << 27;
+const SIE_RX_OVERFLOW: u32 = 1 << 26;
+const SIE_BIT_STUFF_ERROR: u32 = 1 << 25;
+const SIE_CRC_ERROR: u32 = 1 << 24;
+const SIE_TRANS_COMPLETE: u32 = 1 << 18;
 
 const USB_BUF_CTRL_AVAILABLE: u32 = 1 << 10;
 const USB_BUF_CTRL_FULL: u32 = 1 << 15;
@@ -58,6 +70,14 @@ const INTR_SETUP_REQ: u32 = 1 << 16;
 const INTR_DEV_CONN_DIS: u32 = 1 << 13;
 const INTR_BUS_RESET: u32 = 1 << 12;
 const INTR_VBUS_DETECT: u32 = 1 << 11;
+const INTR_STALL: u32 = 1 << 10;
+const INTR_ERROR_CRC: u32 = 1 << 9;
+const INTR_ERROR_BIT_STUFF: u32 = 1 << 8;
+const INTR_ERROR_RX_OVERFLOW: u32 = 1 << 7;
+const INTR_ERROR_RX_TIMEOUT: u32 = 1 << 6;
+const INTR_TRANS_COMPLETE: u32 = 1 << 3;
+const INTR_HOST_SOF: u32 = 1 << 2;
+const INTR_HOST_CONN_DIS: u32 = 1 << 0;
 const PWR_VBUS_DETECT: u32 = 1 << 3;
 const PWR_VBUS_DETECT_OVERRIDE_EN: u32 = 1 << 2;
 
@@ -84,15 +104,20 @@ struct UsbState {
     nak_poll: u32,
     ep_status_stall_nak: u32,
     host_mode: bool,
+    sof_enabled: bool,
+    connected_device: bool,
     read_alarms: Vec<Alarm>,
     write_alarms: Vec<Alarm>,
     reset_alarm: Alarm,
+    sof_alarm: Alarm,
+    host_alarm: Alarm,
     read_buffers: Vec<VecDeque<Vec<u8>>>,
     write_buffers: Vec<VecDeque<Vec<u8>>>,
     on_usb_enabled: Option<EmptyFn>,
     on_reset_received: Option<EmptyFn>,
     on_endpoint_write: Option<EndpointWriteFn>,
     on_endpoint_read: Option<EndpointReadFn>,
+    on_device_connected: Option<EmptyFn>,
     write_delay_micros: u64,
 }
 
@@ -128,15 +153,20 @@ impl UsbController {
             nak_poll: 0,
             ep_status_stall_nak: 0,
             host_mode: false,
+            sof_enabled: false,
+            connected_device: false,
             read_alarms: Vec::new(),
             write_alarms: Vec::new(),
             reset_alarm: clock.create_alarm(Box::new(|| {})),
+            sof_alarm: clock.create_alarm(Box::new(|| {})),
+            host_alarm: clock.create_alarm(Box::new(|| {})),
             read_buffers: (0..ENDPOINT_COUNT).map(|_| VecDeque::new()).collect(),
             write_buffers: (0..ENDPOINT_COUNT).map(|_| VecDeque::new()).collect(),
             on_usb_enabled: None,
             on_reset_received: None,
             on_endpoint_write: None,
             on_endpoint_read: None,
+            on_device_connected: None,
             write_delay_micros: 10,
         }));
         let mut read_alarms = Vec::with_capacity(ENDPOINT_COUNT);
@@ -158,11 +188,23 @@ impl UsbController {
         let reset_alarm = clock.create_alarm(Box::new(move || {
             reset_received(&reset_state, &reset_board);
         }));
+        let sof_state = state.clone();
+        let sof_board = board.clone();
+        let sof_alarm = clock.create_alarm(Box::new(move || {
+            generate_sof(&sof_state, &sof_board);
+        }));
+        let host_state = state.clone();
+        let host_board = board.clone();
+        let host_alarm = clock.create_alarm(Box::new(move || {
+            complete_host_transaction(&host_state, &host_board);
+        }));
         {
             let mut state = state.borrow_mut();
             state.read_alarms = read_alarms;
             state.write_alarms = write_alarms;
             state.reset_alarm = reset_alarm;
+            state.sof_alarm = sof_alarm;
+            state.host_alarm = host_alarm;
         }
         Self {
             name: name.into(),
@@ -213,6 +255,84 @@ impl UsbController {
 
     pub fn set_on_endpoint_read(&self, callback: EndpointReadFn) {
         self.state.borrow_mut().on_endpoint_read = Some(callback);
+    }
+
+    pub fn set_on_device_connected(&self, callback: EmptyFn) {
+        self.state.borrow_mut().on_device_connected = Some(callback);
+    }
+
+    pub fn connect_device(&self) {
+        let enabled = {
+            let mut state = self.state.borrow_mut();
+            state.connected_device = true;
+            state.main_ctrl & CONTROLLER_EN != 0 && state.host_mode
+        };
+        if enabled {
+            self.host_device_connected();
+        }
+    }
+
+    pub fn disconnect_device(&self) {
+        let host = {
+            let mut state = self.state.borrow_mut();
+            let host = state.host_mode && state.connected_device;
+            state.connected_device = false;
+            if host {
+                state.sie_status &= !SIE_SPEED_MASK;
+                state.int_raw |= INTR_HOST_CONN_DIS;
+            }
+            host
+        };
+        if host {
+            self.check_interrupts();
+        }
+    }
+
+    fn host_device_connected(&self) {
+        {
+            let mut state = self.state.borrow_mut();
+            state.sie_status &= !SIE_SPEED_MASK;
+            state.sie_status |= SIE_SPEED_FS;
+            state.int_raw |= INTR_HOST_CONN_DIS;
+        }
+        self.check_interrupts();
+        let callback = self.state.borrow_mut().on_device_connected.take();
+        if let Some(mut callback) = callback {
+            callback();
+            let mut state = self.state.borrow_mut();
+            if state.on_device_connected.is_none() {
+                state.on_device_connected = Some(callback);
+            }
+        }
+    }
+
+    fn handle_sie_ctrl(&self, value: u32) {
+        let (schedule_sof, cancel_sof) = {
+            let mut state = self.state.borrow_mut();
+            state.sie_ctrl = value;
+            let enable = value & SIE_CTRL_SOF_EN != 0;
+            let was_enabled = state.sof_enabled;
+            state.sof_enabled = enable;
+            (enable && !was_enabled, !enable && was_enabled)
+        };
+        if schedule_sof {
+            let mut alarm = self.state.borrow().sof_alarm.clone();
+            alarm.schedule(1_000_000.0);
+            self.state.borrow_mut().sof_alarm = alarm;
+        } else if cancel_sof {
+            let mut alarm = self.state.borrow().sof_alarm.clone();
+            alarm.cancel();
+            self.state.borrow_mut().sof_alarm = alarm;
+        }
+        if value & SIE_CTRL_RESET_BUS != 0 {
+            self.state.borrow_mut().sie_status |= SIE_BUS_RESET;
+            self.sie_status_updated();
+        }
+        if value & SIE_CTRL_START_TRANS != 0 {
+            let mut alarm = self.state.borrow().host_alarm.clone();
+            alarm.schedule(5_000.0);
+            self.state.borrow_mut().host_alarm = alarm;
+        }
     }
 
     pub fn dpram_updated(&self, offset: u32, value: u32) {
@@ -360,17 +480,28 @@ impl UsbController {
 
     fn sie_status_updated(&self) {
         let mut state = self.state.borrow_mut();
-        let mapping = [
-            (SIE_SETUP_REC, INTR_SETUP_REQ),
-            (SIE_BUS_RESET, INTR_BUS_RESET),
-            (SIE_VBUS_DETECTED, INTR_VBUS_DETECT),
-            (SIE_CONNECTED, INTR_DEV_CONN_DIS),
-        ];
+        let mapping: &[(u32, u32)] = if state.host_mode {
+            &[
+                (SIE_TRANS_COMPLETE, INTR_TRANS_COMPLETE),
+                (SIE_STALL_REC, INTR_STALL),
+                (SIE_CRC_ERROR, INTR_ERROR_CRC),
+                (SIE_BIT_STUFF_ERROR, INTR_ERROR_BIT_STUFF),
+                (SIE_RX_OVERFLOW, INTR_ERROR_RX_OVERFLOW),
+                (SIE_RX_TIMEOUT, INTR_ERROR_RX_TIMEOUT),
+            ]
+        } else {
+            &[
+                (SIE_SETUP_REC, INTR_SETUP_REQ),
+                (SIE_BUS_RESET, INTR_BUS_RESET),
+                (SIE_VBUS_DETECTED, INTR_VBUS_DETECT),
+                (SIE_CONNECTED, INTR_DEV_CONN_DIS),
+            ]
+        };
         for (sie_bit, int_bit) in mapping {
-            if state.sie_status & sie_bit != 0 {
-                state.int_raw |= int_bit;
+            if state.sie_status & *sie_bit != 0 {
+                state.int_raw |= *int_bit;
             } else {
-                state.int_raw &= !int_bit;
+                state.int_raw &= !*int_bit;
             }
         }
         drop(state);
@@ -453,6 +584,44 @@ fn reset_received(state: &Rc<RefCell<UsbState>>, board: &Weak<RefCell<BoardShare
     }
 }
 
+fn generate_sof(state: &Rc<RefCell<UsbState>>, board: &Weak<RefCell<BoardShared>>) {
+    let enabled = {
+        let mut state = state.borrow_mut();
+        state.sof_frame = state.sof_frame.wrapping_add(1) & 0x7ff;
+        state.int_raw |= INTR_HOST_SOF;
+        state.sof_enabled
+    };
+    if let Some(board) = board.upgrade() {
+        if let Some(usb) = board.borrow().usb_ctrl.clone() {
+            usb.check_interrupts();
+            if enabled {
+                let mut alarm = usb.state.borrow().sof_alarm.clone();
+                alarm.schedule(1_000_000.0);
+                usb.state.borrow_mut().sof_alarm = alarm;
+            }
+        }
+    }
+}
+
+fn complete_host_transaction(
+    state: &Rc<RefCell<UsbState>>,
+    board: &Weak<RefCell<BoardShared>>,
+) {
+    {
+        let mut state = state.borrow_mut();
+        if state.connected_device {
+            state.sie_status |= SIE_TRANS_COMPLETE | SIE_ACK_REC;
+        } else {
+            state.sie_status |= SIE_RX_TIMEOUT;
+        }
+    }
+    if let Some(board) = board.upgrade() {
+        if let Some(usb) = board.borrow().usb_ctrl.clone() {
+            usb.sie_status_updated();
+        }
+    }
+}
+
 impl Peripheral for UsbController {
     fn name(&self) -> &str {
         &self.name
@@ -469,7 +638,15 @@ impl Peripheral for UsbController {
             SOF_WR => 0,
             SOF_RD => state.sof_frame & 0x7ff,
             SIE_CTRL => state.sie_ctrl,
-            SIE_STATUS => state.sie_status,
+            SIE_STATUS => {
+                let value = state.sie_status;
+                if state.host_mode && state.int_raw & INTR_HOST_CONN_DIS != 0 {
+                    drop(state);
+                    self.state.borrow_mut().int_raw &= !INTR_HOST_CONN_DIS;
+                    self.check_interrupts();
+                }
+                value
+            }
             INT_EP_CTRL => state.int_ep_ctrl,
             BUFF_STATUS => state.buff_status,
             BUFF_CPU_SHOULD_HANDLE => 0,
@@ -517,9 +694,14 @@ impl Peripheral for UsbController {
                             state.on_usb_enabled = Some(callback);
                         }
                     }
+                } else if enabled && host {
+                    let connected = self.state.borrow().connected_device;
+                    if connected {
+                        self.host_device_connected();
+                    }
                 }
             }
-            SIE_CTRL => self.state.borrow_mut().sie_ctrl = atomic_value,
+            SIE_CTRL => self.handle_sie_ctrl(atomic_value),
             SIE_STATUS => {
                 self.state.borrow_mut().sie_status &= !(value & SIE_WRITECLEAR_MASK);
                 if value & SIE_BUS_RESET != 0 {
