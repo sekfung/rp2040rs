@@ -27,7 +27,10 @@ impl GdbTcpServer {
 
     pub fn serve(&self, server: &mut GdbServer) -> std::io::Result<()> {
         loop {
-            self.serve_one(server)?;
+            if self.serve_one(server).is_err() {
+                // A single client connection failing must not stop the server.
+                continue;
+            }
         }
     }
 

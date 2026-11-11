@@ -3,7 +3,7 @@ use std::net::TcpStream;
 use std::thread;
 
 use rp2040rs::gdb::utils::{decode_hex_buf, encode_hex_u32_le};
-use rp2040rs::{GdbConnection, GdbServer, GdbTcpServer, Rp2040, Simulator};
+use rp2040rs::{GdbConnection, GdbServer, GdbTarget, GdbTcpServer, Rp2040, Simulator};
 
 fn server() -> GdbServer {
     GdbServer::new(Box::new(Simulator::new()))
@@ -46,9 +46,18 @@ fn steps_continues_and_reports_break() {
 
     rp2040.write_u16(0x2000_0000, 0xbe00); // BKPT
     rp2040.core.set_pc(0x2000_0000);
-    assert_eq!(gdb.process_message("c").unwrap(), "OK");
+    assert!(gdb.process_message("c").unwrap().starts_with("S05"));
     assert_eq!(rp2040.core.pc(), 0x2000_0000);
     assert!(!gdb.target.executing());
+}
+
+#[test]
+fn simulator_batches_can_continue_again() {
+    let mut simulator = Simulator::new();
+    simulator.execute_steps(8);
+    assert!(!simulator.executing());
+    simulator.execute_steps(8);
+    assert!(!simulator.executing());
 }
 
 #[test]
@@ -67,7 +76,17 @@ fn query_commands_return_expected_packets() {
         .process_message("qRegisterInfo0")
         .unwrap()
         .contains("name:r0"));
+    assert!(gdb
+        .process_message("qRegisterInfo11")
+        .unwrap()
+        .contains("name:msp"));
+    assert!(gdb
+        .process_message("qXfer:features:read:target.xml:0,1")
+        .unwrap()
+        .contains("org.gnu.gdb.arm.m-system"));
     assert_eq!(gdb.process_message("qRegisterInfo99").unwrap(), "E45");
+    assert_eq!(gdb.process_message("P0=12").unwrap(), "E00");
+    assert_eq!(gdb.process_message("p99").unwrap(), "");
 }
 
 #[test]
@@ -77,23 +96,16 @@ fn tcp_server_completes_one_handshake() {
     };
     let server_addr = tcp.local_addr().unwrap();
     let client = thread::spawn(move || {
-        let Ok(mut stream) = TcpStream::connect(server_addr) else {
-            return String::new();
-        };
+        let mut stream = TcpStream::connect(server_addr).expect("connect to gdb server");
         stream.write_all(b"$?#3f").unwrap();
         let mut response = [0u8; 64];
         let count = stream.read(&mut response).unwrap();
         String::from_utf8_lossy(&response[..count]).into_owned()
     });
     let mut gdb = server();
-    if tcp.serve_one(&mut gdb).is_err() {
-        return;
-    }
+    tcp.serve_one(&mut gdb).expect("serve one gdb connection");
     let response = client.join().unwrap();
-    assert!(
-        response.is_empty() || response.contains("+$S05#b8"),
-        "response was {response:?}"
-    );
+    assert!(response.contains("+$S05#b8"), "response was {response:?}");
 }
 
 #[test]

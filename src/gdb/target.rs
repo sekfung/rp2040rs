@@ -5,4 +5,7 @@ pub trait GdbTarget {
     fn executing(&self) -> bool;
     fn execute(&mut self);
     fn stop(&mut self);
+    fn last_break(&self) -> bool {
+        false
+    }
 }

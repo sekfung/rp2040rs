@@ -1,11 +1,11 @@
 use crate::cortex_m0_core::{SYSM_CONTROL, SYSM_MSP, SYSM_PRIMASK, SYSM_PSP};
 use crate::gdb::target::GdbTarget;
-use crate::gdb::utils::{decode_hex_buf, decode_hex_u32_le, encode_hex_buf, encode_hex_u32_le};
+use crate::gdb::utils::{decode_hex_buf, encode_hex_buf, encode_hex_u32_le};
 
 pub const STOP_REPLY_SIGINT: &str = "S02";
 pub const STOP_REPLY_TRAP: &str = "S05";
 
-const REGISTER_INFO: [&str; 17] = [
+const REGISTER_INFO: [&str; 23] = [
     "name:r0;bitsize:32;offset:0;encoding:int;format:hex;set:General Purpose Registers;",
     "name:r1;bitsize:32;offset:4;encoding:int;format:hex;set:General Purpose Registers;",
     "name:r2;bitsize:32;offset:8;encoding:int;format:hex;set:General Purpose Registers;",
@@ -23,9 +23,15 @@ const REGISTER_INFO: [&str; 17] = [
     "name:lr;bitsize:32;offset:56;encoding:int;format:hex;set:General Purpose Registers;",
     "name:pc;bitsize:32;offset:60;encoding:int;format:hex;set:General Purpose Registers;",
     "name:cpsr;bitsize:32;offset:64;encoding:int;format:hex;set:General Purpose Registers;",
+    "name:msp;bitsize:32;offset:68;encoding:int;format:hex;set:System Registers;",
+    "name:psp;bitsize:32;offset:72;encoding:int;format:hex;set:System Registers;",
+    "name:primask;bitsize:8;offset:76;encoding:int;format:hex;set:System Registers;",
+    "name:basepri;bitsize:8;offset:77;encoding:int;format:hex;set:System Registers;",
+    "name:faultmask;bitsize:8;offset:78;encoding:int;format:hex;set:System Registers;",
+    "name:control;bitsize:8;offset:79;encoding:int;format:hex;set:System Registers;",
 ];
 
-const TARGET_XML: &str = "<?xml version=\"1.0\"?><!DOCTYPE target SYSTEM \"gdb-target.dtd\"><target version=\"1.0\"><architecture>arm</architecture><feature name=\"org.gnu.gdb.arm.m-profile\"><reg name=\"r0\" bitsize=\"32\" regnum=\"0\"/><reg name=\"r1\" bitsize=\"32\" regnum=\"1\"/><reg name=\"r2\" bitsize=\"32\" regnum=\"2\"/><reg name=\"r3\" bitsize=\"32\" regnum=\"3\"/><reg name=\"r4\" bitsize=\"32\" regnum=\"4\"/><reg name=\"r5\" bitsize=\"32\" regnum=\"5\"/><reg name=\"r6\" bitsize=\"32\" regnum=\"6\"/><reg name=\"r7\" bitsize=\"32\" regnum=\"7\"/><reg name=\"r8\" bitsize=\"32\" regnum=\"8\"/><reg name=\"r9\" bitsize=\"32\" regnum=\"9\"/><reg name=\"r10\" bitsize=\"32\" regnum=\"10\"/><reg name=\"r11\" bitsize=\"32\" regnum=\"11\"/><reg name=\"r12\" bitsize=\"32\" regnum=\"12\"/><reg name=\"sp\" bitsize=\"32\" regnum=\"13\"/><reg name=\"lr\" bitsize=\"32\" regnum=\"14\"/><reg name=\"pc\" bitsize=\"32\" regnum=\"15\"/><reg name=\"xPSR\" bitsize=\"32\" regnum=\"16\"/></feature></target>";
+const TARGET_XML: &str = "<?xml version=\"1.0\"?><!DOCTYPE target SYSTEM \"gdb-target.dtd\"><target version=\"1.0\"><architecture>arm</architecture><feature name=\"org.gnu.gdb.arm.m-profile\"><reg name=\"r0\" bitsize=\"32\" regnum=\"0\"/><reg name=\"r1\" bitsize=\"32\" regnum=\"1\"/><reg name=\"r2\" bitsize=\"32\" regnum=\"2\"/><reg name=\"r3\" bitsize=\"32\" regnum=\"3\"/><reg name=\"r4\" bitsize=\"32\" regnum=\"4\"/><reg name=\"r5\" bitsize=\"32\" regnum=\"5\"/><reg name=\"r6\" bitsize=\"32\" regnum=\"6\"/><reg name=\"r7\" bitsize=\"32\" regnum=\"7\"/><reg name=\"r8\" bitsize=\"32\" regnum=\"8\"/><reg name=\"r9\" bitsize=\"32\" regnum=\"9\"/><reg name=\"r10\" bitsize=\"32\" regnum=\"10\"/><reg name=\"r11\" bitsize=\"32\" regnum=\"11\"/><reg name=\"r12\" bitsize=\"32\" regnum=\"12\"/><reg name=\"sp\" bitsize=\"32\" regnum=\"13\"/><reg name=\"lr\" bitsize=\"32\" regnum=\"14\"/><reg name=\"pc\" bitsize=\"32\" regnum=\"15\"/><reg name=\"xPSR\" bitsize=\"32\" regnum=\"16\"/></feature><feature name=\"org.gnu.gdb.arm.m-system\"><reg name=\"msp\" bitsize=\"32\" regnum=\"17\"/><reg name=\"psp\" bitsize=\"32\" regnum=\"18\"/><reg name=\"primask\" bitsize=\"8\" regnum=\"19\"/><reg name=\"basepri\" bitsize=\"8\" regnum=\"20\"/><reg name=\"faultmask\" bitsize=\"8\" regnum=\"21\"/><reg name=\"control\" bitsize=\"8\" regnum=\"22\"/></feature></target>";
 
 pub struct GdbServer {
     pub target: Box<dyn GdbTarget>,
@@ -75,7 +81,7 @@ impl GdbServer {
                 }
                 if cmd.starts_with("vCont;c") {
                     self.continue_target();
-                    return None;
+                    return Some(STOP_REPLY_TRAP.into());
                 }
                 if cmd.starts_with("vCont;s") {
                     rp2040.step();
@@ -85,7 +91,7 @@ impl GdbServer {
             }
             'c' => {
                 self.continue_target();
-                Some("OK".into())
+                Some(STOP_REPLY_TRAP.into())
             }
             'g' => {
                 let mut bytes = Vec::with_capacity(17 * 4);
@@ -105,14 +111,23 @@ impl GdbServer {
                     0x13 => u32::from(core.pm()),
                     0x14 | 0x15 => 0,
                     0x16 => core.read_special_register(SYSM_CONTROL),
-                    _ => return Some("E45".into()),
+                    _ => return Some(String::new()),
                 };
                 Some(encode_hex_u32_le(value))
             }
             'P' => {
                 let (index, value) = cmd.get(1..)?.split_once('=')?;
                 let index = usize::from_str_radix(index, 16).ok()?;
-                let value = decode_hex_u32_le(value.trim());
+                let decoded = decode_hex_buf(value.trim());
+                let expected_bytes = if index > 0x12 { 1 } else { 4 };
+                if decoded.len() != expected_bytes {
+                    return Some("E00".into());
+                }
+                let mut raw = [0u8; 4];
+                for (dst, src) in raw.iter_mut().zip(decoded.iter()) {
+                    *dst = *src;
+                }
+                let value = u32::from_le_bytes(raw);
                 match index {
                     0..=15 => core.set_reg(index, value),
                     0x10 => core.set_xpsr(value),
@@ -152,15 +167,17 @@ impl GdbServer {
         }
     }
 
-    fn continue_target(&mut self) {
+    fn continue_target(&mut self) -> bool {
         if !self.target.executing() {
             self.target.execute();
         }
-        if !self.target.executing() {
+        let broke = self.target.last_break();
+        if !self.target.executing() && broke {
             let rp = self.target.rp2040();
             let pc = rp.core.pc().wrapping_sub(rp.core.break_rewind());
             rp.core.set_pc(pc);
         }
+        broke
     }
 
     fn step_reply(&self) -> String {

@@ -28,10 +28,15 @@ impl Simulator {
     }
 
     pub fn execute_once(&mut self) {
+        self.execute_steps(1_000_000);
+    }
+
+    /// Execute at most `limit` instructions and leave the target stopped.
+    pub fn execute_steps(&mut self, limit: usize) {
         self.stopped = false;
         self.break_flag.set(false);
         let cycle_nanos = 1e9 / 125_000_000.0;
-        for _ in 0..1_000_000 {
+        for _ in 0..limit {
             if self.stopped || self.break_flag.get() {
                 break;
             }
@@ -46,9 +51,8 @@ impl Simulator {
                 self.clock.tick(cycles as f64 * cycle_nanos);
             }
         }
-        if self.break_flag.get() {
-            self.stopped = true;
-        }
+        // A batch is synchronous: report stopped until the next continue.
+        self.stopped = true;
     }
 }
 
@@ -73,5 +77,9 @@ impl GdbTarget for Simulator {
 
     fn stop(&mut self) {
         self.stopped = true;
+    }
+
+    fn last_break(&self) -> bool {
+        self.break_flag.get()
     }
 }
