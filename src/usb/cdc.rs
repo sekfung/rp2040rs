@@ -247,14 +247,20 @@ fn handle_endpoint_write(cdc: &Rc<RefCell<CdcState>>, endpoint: u32, buffer: &[u
         let callback = cdc.borrow_mut().on_device_connected.take();
         if let Some(mut callback) = callback {
             callback();
-            cdc.borrow_mut().on_device_connected = Some(callback);
+            let mut state = cdc.borrow_mut();
+            if state.on_device_connected.is_none() {
+                state.on_device_connected = Some(callback);
+            }
         }
     }
     if serial {
         let callback = cdc.borrow_mut().on_serial_data.take();
         if let Some(mut callback) = callback {
             callback(buffer);
-            cdc.borrow_mut().on_serial_data = Some(callback);
+            let mut state = cdc.borrow_mut();
+            if state.on_serial_data.is_none() {
+                state.on_serial_data = Some(callback);
+            }
         }
     }
 }

@@ -91,3 +91,20 @@ fn double_buffer_in_completion_clears_buffer1_available_and_full() {
     assert_eq!(control & ((1 << 10) << 16), 0);
     assert_eq!(control & ((1 << 15) << 16), 0);
 }
+
+#[test]
+fn usb_atomic_aliases_merge_non_w1c_registers() {
+    let rp = Rp2040::new();
+
+    rp.write_u32(0x5011_0040, 1); // MAIN_CTRL.CONTROLLER_EN
+    rp.write_u32(0x5011_3040, 1); // CLR alias
+    assert_eq!(rp.read_u32(0x5011_0040) & 1, 0);
+
+    rp.write_u32(0x5011_004c, 0x200); // SIE_CTRL bit 9
+    rp.write_u32(0x5011_204c, 0x100); // SET alias, bit 8
+    assert_eq!(rp.read_u32(0x5011_004c), 0x300);
+
+    rp.write_u32(0x5011_0004, 1); // ADDR_ENDP1
+    rp.write_u32(0x5011_2004, 2); // SET alias
+    assert_eq!(rp.read_u32(0x5011_0004), 3);
+}

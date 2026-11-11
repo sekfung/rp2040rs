@@ -44,7 +44,7 @@ const SIE_VBUS_DETECTED: u32 = 1;
 const SIE_LINE_STATE_MASK: u32 = 0x3;
 const SIE_LINE_STATE_SHIFT: u32 = 2;
 const SIE_J_STATE: u32 = 1;
-const SIE_WRITECLEAR_MASK: u32 = 0xffff_0000 | 0x0000_0c12;
+const SIE_WRITECLEAR_MASK: u32 = 0xff0f_0800;
 
 const USB_BUF_CTRL_AVAILABLE: u32 = 1 << 10;
 const USB_BUF_CTRL_FULL: u32 = 1 << 15;
@@ -488,18 +488,24 @@ impl Peripheral for UsbController {
     }
 
     fn write_u32_atomic(&self, offset: u32, value: u32, atomic_type: u32) {
+        let atomic_value = if atomic_type == 0 {
+            value
+        } else {
+            crate::peripherals::peripheral::atomic_update(self.read_u32(offset), atomic_type, value)
+        };
         if (ADDR_ENDP1..=ADDR_ENDP15).contains(&offset) && offset & 3 == 0 {
-            self.state.borrow_mut().int_ep_addr[((offset - ADDR_ENDP1) >> 2) as usize] = value;
+            self.state.borrow_mut().int_ep_addr[((offset - ADDR_ENDP1) >> 2) as usize] =
+                atomic_value;
             return;
         }
         match offset {
-            ADDR_ENDP => self.state.borrow_mut().addr_endp = value,
+            ADDR_ENDP => self.state.borrow_mut().addr_endp = atomic_value,
             MAIN_CTRL => {
-                let enabled = value & CONTROLLER_EN != 0;
-                let host = value & HOST_NDEVICE != 0;
+                let enabled = atomic_value & CONTROLLER_EN != 0;
+                let host = atomic_value & HOST_NDEVICE != 0;
                 {
                     let mut state = self.state.borrow_mut();
-                    state.main_ctrl = value & 0x8000_0003;
+                    state.main_ctrl = atomic_value & 0x8000_0003;
                     state.host_mode = host;
                 }
                 if enabled && !host {
@@ -513,7 +519,7 @@ impl Peripheral for UsbController {
                     }
                 }
             }
-            SIE_CTRL => self.state.borrow_mut().sie_ctrl = value,
+            SIE_CTRL => self.state.borrow_mut().sie_ctrl = atomic_value,
             SIE_STATUS => {
                 self.state.borrow_mut().sie_status &= !(value & SIE_WRITECLEAR_MASK);
                 if value & SIE_BUS_RESET != 0 {
@@ -531,7 +537,7 @@ impl Peripheral for UsbController {
                 }
                 self.sie_status_updated();
             }
-            INT_EP_CTRL => self.state.borrow_mut().int_ep_ctrl = value,
+            INT_EP_CTRL => self.state.borrow_mut().int_ep_ctrl = atomic_value,
             BUFF_STATUS => {
                 self.state.borrow_mut().buff_status &= !value;
                 let status = self.state.borrow().buff_status;
@@ -542,12 +548,12 @@ impl Peripheral for UsbController {
             }
             EP_ABORT => {
                 let mut state = self.state.borrow_mut();
-                state.ep_abort = value;
-                state.ep_abort_done |= value;
+                state.ep_abort = atomic_value;
+                state.ep_abort_done |= atomic_value;
             }
             EP_ABORT_DONE => self.state.borrow_mut().ep_abort_done &= !value,
-            EP_STALL_ARM => self.state.borrow_mut().ep_stall_arm = value,
-            NAK_POLL => self.state.borrow_mut().nak_poll = value,
+            EP_STALL_ARM => self.state.borrow_mut().ep_stall_arm = atomic_value,
+            NAK_POLL => self.state.borrow_mut().nak_poll = atomic_value,
             EP_STATUS_STALL_NAK => self.state.borrow_mut().ep_status_stall_nak &= !value,
             USB_MUXING => {
                 if value & 0x4 != 0 && value & 0x1 == 0 {
@@ -555,9 +561,9 @@ impl Peripheral for UsbController {
                 }
             }
             USB_PWR => {
-                self.state.borrow_mut().usb_pwr = value;
-                if value & PWR_VBUS_DETECT_OVERRIDE_EN != 0 {
-                    if value & PWR_VBUS_DETECT != 0 {
+                self.state.borrow_mut().usb_pwr = atomic_value;
+                if atomic_value & PWR_VBUS_DETECT_OVERRIDE_EN != 0 {
+                    if atomic_value & PWR_VBUS_DETECT != 0 {
                         self.state.borrow_mut().sie_status |= SIE_VBUS_DETECTED;
                     } else {
                         self.state.borrow_mut().sie_status &= !SIE_VBUS_DETECTED;
@@ -565,26 +571,14 @@ impl Peripheral for UsbController {
                 }
             }
             INTE => {
-                let current = self.state.borrow().int_enable;
-                self.state.borrow_mut().int_enable = if atomic_type == 0 {
-                    value & 0xfffff
-                } else {
-                    crate::peripherals::peripheral::atomic_update(current, atomic_type, value)
-                        & 0xfffff
-                };
+                self.state.borrow_mut().int_enable = atomic_value & 0xfffff;
                 self.check_interrupts();
             }
             INTF => {
-                let current = self.state.borrow().int_force;
-                self.state.borrow_mut().int_force = if atomic_type == 0 {
-                    value & 0xfffff
-                } else {
-                    crate::peripherals::peripheral::atomic_update(current, atomic_type, value)
-                        & 0xfffff
-                };
+                self.state.borrow_mut().int_force = atomic_value & 0xfffff;
                 self.check_interrupts();
             }
-            SOF_WR => self.state.borrow_mut().sof_frame = value & 0x7ff,
+            SOF_WR => self.state.borrow_mut().sof_frame = atomic_value & 0x7ff,
             _ => {}
         }
     }
