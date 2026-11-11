@@ -368,6 +368,10 @@ impl Core {
         self.state.borrow_mut().interrupts_updated = value;
     }
 
+    pub fn interrupts_updated(&self) -> bool {
+        self.state.borrow().interrupts_updated
+    }
+
     pub fn interrupt_priorities(&self) -> [u32; 4] {
         self.state.borrow().interrupt_priorities
     }

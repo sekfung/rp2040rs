@@ -10,6 +10,7 @@ use crate::peripherals::dma::Dma;
 use crate::peripherals::pll::Pll;
 use crate::peripherals::ppb::Ppb;
 use crate::peripherals::pwm::Pwm;
+use crate::peripherals::timer::Timer;
 use crate::peripherals::uart::Uart;
 use crate::peripherals::xosc::Xosc;
 use crate::peripherals::{BasePeripheral, Peripheral};
@@ -132,6 +133,7 @@ pub struct BoardShared {
     pub pll_usb: Option<Pll>,
     pub xosc: Option<Xosc>,
     pub pwm: Option<Pwm>,
+    pub timer: Option<Timer>,
     pub uart: [Option<Uart>; 2],
     pub sio: Option<Sio>,
     pub dma: Option<Dma>,
@@ -154,6 +156,7 @@ pub struct Rp2040 {
     pub pll_usb: Pll,
     pub xosc: Xosc,
     pub pwm: Pwm,
+    pub timer: Timer,
     pub uart: [Uart; 2],
     pub sio: Sio,
     pub dma: Dma,
@@ -199,6 +202,7 @@ impl Rp2040 {
                 pll_usb: None,
                 xosc: None,
                 pwm: None,
+                timer: None,
                 uart: [None, None],
                 sio: None,
                 dma: None,
@@ -214,6 +218,7 @@ impl Rp2040 {
         let pll_usb = Pll::new("PLL_USB_BASE", weak.clone());
         let xosc = Xosc::new("XOSC_BASE", weak.clone());
         let pwm = Pwm::new("PWM_BASE", weak.clone());
+        let timer = Timer::new("TIMER_BASE", weak.clone());
         let uart = [
             Uart::new("UART0", weak.clone()),
             Uart::new("UART1", weak.clone()),
@@ -228,6 +233,7 @@ impl Rp2040 {
             board.pll_usb = Some(pll_usb.clone());
             board.xosc = Some(xosc.clone());
             board.pwm = Some(pwm.clone());
+            board.timer = Some(timer.clone());
             board.uart = [Some(uart[0].clone()), Some(uart[1].clone())];
             board.sio = Some(sio.clone());
             board.dma = Some(dma.clone());
@@ -246,6 +252,7 @@ impl Rp2040 {
             pll_usb,
             xosc,
             pwm,
+            timer,
             uart,
             sio,
             dma,
@@ -302,12 +309,13 @@ impl Rp2040 {
     }
 
     fn register_real_peripherals(&self) {
-        let entries: [(u32, Rc<dyn Peripheral>); 5] = [
+        let entries: [(u32, Rc<dyn Peripheral>); 6] = [
             (0x40008, Rc::new(self.clocks.clone())),
             (0x40024, Rc::new(self.xosc.clone())),
             (0x40028, Rc::new(self.pll_sys.clone())),
             (0x4002c, Rc::new(self.pll_usb.clone())),
             (0x40050, Rc::new(self.pwm.clone())),
+            (0x40054, Rc::new(self.timer.clone())),
         ];
         for (key, peripheral) in entries {
             self.set_peripheral(key, peripheral);

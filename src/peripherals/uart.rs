@@ -67,12 +67,53 @@ impl Uart {
     }
 
     pub fn clk_peri_changed(&self, clk_peri: f64) {
+        self.recompute_baud(clk_peri);
+    }
+
+    fn read_register(&self, offset: u32) -> u32 {
+        let state = self.state.borrow();
+        match offset {
+            UARTIBRD => state.ibrd,
+            UARTFBRD => state.fbrd,
+            UARTLCR_H => state.lcr_h,
+            _ => 0xffff_ffff,
+        }
+    }
+
+    fn write_register(&self, offset: u32, value: u32) {
+        match offset {
+            UARTIBRD => {
+                self.state.borrow_mut().ibrd = value & 0xffff;
+                self.recompute_baud(self.clk_peri());
+            }
+            UARTFBRD => {
+                self.state.borrow_mut().fbrd = value & 0x3f;
+                self.recompute_baud(self.clk_peri());
+            }
+            UARTLCR_H => self.state.borrow_mut().lcr_h = value,
+            _ => {
+                if let Some(board) = self.board.upgrade() {
+                    let logger = board.borrow().logger.clone();
+                    logger.borrow().warn(&self.name, "Unimplemented UART write");
+                }
+            }
+        }
+    }
+
+    fn clk_peri(&self) -> f64 {
+        self.board
+            .upgrade()
+            .map(|b| b.borrow().clk_peri)
+            .unwrap_or(125_000_000.0)
+    }
+
+    fn recompute_baud(&self, clk_peri: f64) {
         let (divider_set, baud_rate) = {
             let state = self.state.borrow();
-            if state.ibrd == 0 {
+            let divider = f64::from(state.ibrd) + f64::from(state.fbrd) / 64.0;
+            if divider == 0.0 {
                 (false, 0)
             } else {
-                let divider = f64::from(state.ibrd) + f64::from(state.fbrd) / 64.0;
                 (true, (clk_peri / (16.0 * divider)).round() as u32)
             }
         };
@@ -95,30 +136,6 @@ impl Uart {
             }
         }
     }
-
-    fn read_register(&self, offset: u32) -> u32 {
-        let state = self.state.borrow();
-        match offset {
-            UARTIBRD => state.ibrd,
-            UARTFBRD => state.fbrd,
-            UARTLCR_H => state.lcr_h,
-            _ => 0xffff_ffff,
-        }
-    }
-
-    fn write_register(&self, offset: u32, value: u32) {
-        match offset {
-            UARTIBRD => self.state.borrow_mut().ibrd = value & 0xffff,
-            UARTFBRD => self.state.borrow_mut().fbrd = value & 0x3f,
-            UARTLCR_H => self.state.borrow_mut().lcr_h = value,
-            _ => {
-                if let Some(board) = self.board.upgrade() {
-                    let logger = board.borrow().logger.clone();
-                    logger.borrow().warn(&self.name, "Unimplemented UART write");
-                }
-            }
-        }
-    }
 }
 
 impl Peripheral for Uart {
@@ -137,5 +154,32 @@ impl Peripheral for Uart {
             atomic_update(self.read_register(offset), atomic_type, value)
         };
         self.write_register(offset, value);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::peripherals::peripheral::Peripheral;
+    use crate::rp2040::Rp2040;
+
+    const UARTIBRD: u32 = 0x24;
+    const UARTFBRD: u32 = 0x28;
+    const UARTLCR_H: u32 = 0x2c;
+
+    #[test]
+    fn should_return_word_length_based_on_uartlcr_h() {
+        let rp = Rp2040::new();
+        let uart = rp.uart[0].clone();
+        uart.write_u32_atomic(UARTLCR_H, 0x70, 0);
+        assert_eq!(uart.word_length(), 8);
+    }
+
+    #[test]
+    fn should_calculate_baud_rate_from_ibrd_fbrd() {
+        let rp = Rp2040::new();
+        let uart = rp.uart[0].clone();
+        uart.write_u32_atomic(UARTIBRD, 67, 0);
+        uart.write_u32_atomic(UARTFBRD, 52, 0);
+        assert_eq!(uart.baud_rate(), 115207);
     }
 }
