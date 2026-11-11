@@ -8,12 +8,12 @@ Upstream baseline: `vitest run src` reports 14 files and 322 passing tests.
 
 | Upstream spec | Rust module | Cases | Status |
 |---|---|---:|---|
-| `utils/assembler.spec.ts` | `utils/assembler.rs` | 78 | foundation |
-| `utils/pio-assembler.spec.ts` | `utils/pio_assembler.rs` | 9 | foundation |
-| `utils/fifo.spec.ts` | `utils/fifo.rs` | 3 | foundation |
-| `utils/time.spec.ts` | `utils/time.rs` | 1 | foundation |
-| `instructions.spec.ts` | `cortex_m0_core.rs` | 126 | core |
-| `rp2040.spec.ts` | `rp2040.rs` | 22 | core |
+| `utils/assembler.spec.ts` | `utils/assembler.rs` | 78 | implemented (foundation) |
+| `utils/pio-assembler.spec.ts` | `utils/pio_assembler.rs` | 9 | implemented (foundation) |
+| `utils/fifo.spec.ts` | `utils/fifo.rs` | 3 | implemented (foundation) |
+| `utils/time.spec.ts` | `utils/time.rs` | 1 | implemented (foundation) |
+| `instructions.spec.ts` | `cortex_m0_core.rs` | 126 | implemented (core) |
+| `rp2040.spec.ts` | `rp2040.rs` | 22 | implemented (core) |
 | `peripherals/clocks.spec.ts` | `peripherals/clocks.rs` | 16 | implemented |
 | `peripherals/dma.spec.ts` | `peripherals/dma.rs` | 2 | implemented |
 | `peripherals/pio.spec.ts` | `peripherals/pio.rs` | 35 | implemented |
@@ -71,9 +71,28 @@ vitest baseline:
 | USB CDC | 5 |
 | **Total** | **322** |
 
-`cargo test` also passes the added integration suites under `tests/` for
-clock listeners, core state/cycles/shifts, DMA, PWM/timer regressions, PIO
-scheduling, USB controller paths, and CLI-free library smoke coverage.
+`cargo test` also passes the integration suites under `tests/` for clock
+listeners, core state/cycles/shifts, DMA, PWM/timer/GPIO, PIO scheduling and
+DREQ, USB controller/CDC, GDB framing/registers/stop replies, Simulator,
+bootrom/loaders, CLI, and the compile-time `src/index.ts` export audit.
+
+## Host tools and full feature status
+
+Implemented beyond the upstream unit-test surface:
+
+- GDB server (`GdbConnection`, `GdbServer`, `GdbTcpServer`) with RSP framing,
+  register/memory access, single-step, continue/stop replies, and target XML.
+- `Simulator` batching/stop, embedded B1 bootrom (16 KiB), Intel HEX and UF2
+  loaders, and the `rp2040rs` CLI.
+- ADC, I2C0/1, SPI0/1, SSI, RTC, watchdog, RESETS, PSM, PADS, IO_BANK0,
+  BUSCTRL, SYSINFO, SYSCFG, TBMAN, and INTERP0/1.
+- Full UART registers/FIFO/interrupts/line buffering, PWM free-running counter,
+  `CHn_DIV`, double-buffered TOP/CC, wrap DREQ, and GPIO A/B output; per-source
+  GPIO ownership resolved through IO_BANK0 FUNCSEL.
+- PIO clock alarms, TX/RX DREQ, FJOIN_RX read path, SM reset, and side-set.
+
+The crate root re-exports every `src/index.ts` symbol; `tests/exports.rs`
+enforces this at compile time.
 
 ## Count verification note
 
@@ -99,30 +118,25 @@ The per-file figures above are expanded vitest counts, not counts of textual
   `substractUpdateFlags` computes `V=false`. No ported test observes this;
   documented as a source-level deviation.
 - GPIO output is tracked per source (PWM/SIO/PIO0/PIO1) and resolved through
-  IO_BANK0 FUNCSEL, matching upstream `gpio-pin.ts`. PIO `FJOIN_TX`, the full
-  eight-entry shared FIFO, and per-SM `SM_CLKDIV`/`CLKDIV_RESTART` pacing are
-  not implemented; upstream has the same gaps and no ported test asserts them.
-- PIO DMA DREQ signaling and the full GPIO pad/function model are deferred to
-  Plan 4; PIO-driven input values are propagated. Plan 4 also owns PWM
-  output/direction propagation to GPIO (upstream `gpioValue`/`gpioDirection`
-  via `setA`/`setB`, function select 4).
+  IO_BANK0 FUNCSEL. PIO `FJOIN_TX`, the full eight-entry shared FIFO, and
+  per-SM `SM_CLKDIV`/`CLKDIV_RESTART` pacing remain simplified; upstream has
+  the same gaps and no ported test asserts them.
 - USB host-mode SOF/host-transaction alarms, host SIE_STATUS mapping, and host
-  device-connected events are deferred to Plan 4; device-mode CDC is covered.
-  Device-mode SIE interrupt mapping currently covers 4 of upstream's 12 SIE
-  bits and must be completed with the host/SIE work.
-- PWM `CHn_DIV` timing, CTR free-running, TOP/CC double buffering, and wrap
-  DREQ are deferred; the ported phase/wrap cases are covered. PWM GPIO
-  output/direction propagation is a named Plan 4 task.
-- Full UART register set (`UARTDR`, `UARTFR`, `UARTCR`, `UARTIMSC`,
-  `UARTRIS`, `UARTMIS`, `UARTICR`, identity registers) and line-buffer
-  callbacks are deferred to Plan 4; word length, baud, and `clk_peri`
-  retuning are implemented.
+  device-connected events remain deferred; device-mode CDC and controller
+  paths are implemented. Device-mode SIE mapping covers 4 of upstream's 12
+  SIE bits.
+- PWM polarity inversion, `DIVMODE` gating, and phase-correct/compare-output
+  edge cases remain simplified; free-running counter, `CHn_DIV`, double
+  buffering, wrap DREQ, and GPIO A/B output are implemented.
+- UART modem/flow-control, FIFO thresholds, and overrun/error flags remain
+  simplified; the full data/status/control/interrupt/identity register set,
+  RX FIFO, line buffering, and TX/RX callbacks are implemented.
 - TIMER ALARM writes use raw values rather than atomic aliases; normal writes
   are implemented.
-- SIO initial divisor matches upstream's 1; INTERP0/INTERP1 remain Plan 4
-  stubs. SIO signed division uses hardware wrapping semantics (`i32::MIN /
-  -1` wraps, remainder 0), while upstream JavaScript returns the
-  non-wrapped numeric result for that overflow pair.
+- SIO initial divisor matches upstream's 1; INTERP0/INTERP1 are implemented.
+  SIO signed division uses hardware wrapping semantics (`i32::MIN / -1`
+  wraps, remainder 0), while upstream JavaScript returns the non-wrapped
+  numeric result for that overflow pair.
 - TREQ_TIMER3 uses hardware-correct bits 16-31; upstream's 36-bit shift is a
   source-level bug and is not copied.
 - `set_logger` called from inside a logger callback is unsupported.
