@@ -1,3 +1,4 @@
+pub mod assembler;
 pub mod bit;
 pub mod fifo;
 pub mod logging;
