@@ -45,8 +45,8 @@ impl BasePeripheral {
 
     fn warn(&self, message: &str) {
         if let Some(board) = self.board.upgrade() {
-            let board = board.borrow();
-            board.logger.warn(&self.name, message);
+            let logger = board.borrow().logger.clone();
+            logger.borrow().warn(&self.name, message);
         }
     }
 

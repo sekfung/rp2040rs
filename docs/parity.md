@@ -24,9 +24,9 @@ Upstream baseline: `vitest run src` reports 14 files and 322 passing tests.
 | `usb/cdc.spec.ts` | `usb/cdc.rs` | 5 | plan 3 |
 | **Total** | | **322** | |
 
-## Foundation status
+## Foundation-stage checkpoint
 
-`cargo test --lib` reports exactly 91 passing tests:
+At the foundation checkpoint, `cargo test --lib` reported exactly 91 tests:
 
 - `utils::assembler` — 78
 - `utils::pio_assembler` — 9

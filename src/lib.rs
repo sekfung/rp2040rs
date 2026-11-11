@@ -12,4 +12,10 @@ pub mod utils;
 #[cfg(test)]
 pub mod test_support;
 
+pub use clock::{Clock, MockClock, SimulationClock};
+pub use cortex_m0_core::Core;
+pub use peripherals::peripheral::{BasePeripheral, Peripheral};
+pub use rp2040::{Memory, Rp2040};
+pub use utils::{ConsoleLogger, Fifo, LogLevel, Logger};
+
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");

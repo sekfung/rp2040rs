@@ -95,6 +95,22 @@ pub struct Core {
     board: Weak<RefCell<BoardShared>>,
 }
 
+struct BreakCallbackGuard {
+    board: Rc<RefCell<BoardShared>>,
+    callback: Option<Box<dyn FnMut(u32)>>,
+}
+
+impl Drop for BreakCallbackGuard {
+    fn drop(&mut self) {
+        if let Some(callback) = self.callback.take() {
+            let mut board = self.board.borrow_mut();
+            if board.on_break.is_none() {
+                board.on_break = Some(callback);
+            }
+        }
+    }
+}
+
 impl Core {
     pub(crate) fn new(board: Weak<RefCell<BoardShared>>) -> Self {
         let mut state = CoreState::new();
@@ -1077,7 +1093,8 @@ impl Core {
         } else {
             let board = self.board.upgrade();
             if let Some(board) = board {
-                board.borrow().logger.warn(
+                let logger = board.borrow().logger.clone();
+                logger.borrow().warn(
                     "CortexM0Core",
                     &format!("Instruction at {opcode_pc:x} is not implemented yet: {opcode:x}"),
                 );
@@ -1140,11 +1157,14 @@ impl Core {
 
     fn fire_break(&self, code: u32) {
         if let Some(board) = self.board.upgrade() {
-            let mut callback = board.borrow_mut().on_break.take();
-            if let Some(callback) = callback.as_mut() {
+            let callback = board.borrow_mut().on_break.take();
+            let mut guard = BreakCallbackGuard {
+                board: board.clone(),
+                callback,
+            };
+            if let Some(callback) = guard.callback.as_mut() {
                 callback(code);
             }
-            board.borrow_mut().on_break = callback;
         }
     }
 
@@ -1292,7 +1312,7 @@ impl Core {
                 let int_num = n - 16;
                 let priorities = self.state.borrow().interrupt_priorities;
                 for (priority, bits) in priorities.iter().enumerate() {
-                    if bits & (1 << int_num) != 0 {
+                    if bits & 1u32.wrapping_shl(int_num) != 0 {
                         return priority as i32;
                     }
                 }

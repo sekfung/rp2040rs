@@ -1,6 +1,9 @@
+use std::cell::Cell;
+use std::rc::Rc;
+
 use rp2040rs::cortex_m0_core::{StackPointerBank, SYSM_CONTROL, SYSM_PRIMASK};
-use rp2040rs::rp2040::Rp2040;
-use rp2040rs::utils::assembler::{opcode_bx, opcode_nop};
+use rp2040rs::utils::assembler::{opcode_bx, opcode_nop, opcode_udf};
+use rp2040rs::{BasePeripheral, Logger, Rp2040};
 
 const VTOR: u32 = 0xe000_ed08;
 const ICSR: u32 = 0xe000_ed04;
@@ -105,4 +108,75 @@ fn nmi_is_taken_even_when_primask_is_set() {
 
     assert_eq!(core.ipsr(), 2);
     assert_eq!(core.pc(), 0x1000_0102);
+}
+
+#[test]
+fn out_of_range_ipsr_does_not_panic() {
+    let rp = Rp2040::new();
+    rp.write_u16(0x1000_0000, opcode_nop());
+    rp.core.set_pc(0x1000_0000);
+    rp.core.set_ipsr(63);
+    rp.core.set_pending_interrupts(1 << 1);
+    rp.core.set_enabled_interrupts(1 << 1);
+    rp.core.set_interrupts_updated(true);
+
+    rp.core.step();
+}
+
+struct ReentrantLogger {
+    rp: Rp2040,
+    warnings: Rc<Cell<u32>>,
+}
+
+impl Logger for ReentrantLogger {
+    fn debug(&self, _component: &str, _message: &str) {}
+    fn info(&self, _component: &str, _message: &str) {}
+
+    fn warn(&self, _component: &str, _message: &str) {
+        self.warnings.set(self.warnings.get() + 1);
+        self.rp
+            .set_peripheral(0x10, Rc::new(BasePeripheral::new("LoggerTest")));
+    }
+
+    fn error(&self, _component: &str, _message: &str) {}
+}
+
+#[test]
+fn logger_can_reenter_mutable_rp2040_api() {
+    let rp = Rp2040::new();
+    let warnings = Rc::new(Cell::new(0));
+    rp.set_logger(Box::new(ReentrantLogger {
+        rp: rp.clone(),
+        warnings: warnings.clone(),
+    }));
+
+    rp.read_u32(0xf000_0000);
+    assert_eq!(warnings.get(), 1);
+}
+
+#[test]
+fn on_break_can_replace_itself_without_being_overwritten() {
+    let rp = Rp2040::new();
+    rp.write_u16(0x2000_0000, opcode_udf(1));
+    rp.core.set_pc(0x2000_0000);
+
+    let first = Rc::new(Cell::new(0));
+    let second = Rc::new(Cell::new(0));
+    let first_calls = first.clone();
+    let second_calls = second.clone();
+    let replacement = rp.clone();
+    rp.set_on_break(Box::new(move |_| {
+        first_calls.set(first_calls.get() + 1);
+        let second_calls = second_calls.clone();
+        replacement.set_on_break(Box::new(move |_| {
+            second_calls.set(second_calls.get() + 1);
+        }));
+    }));
+
+    rp.core.step();
+    assert_eq!(first.get(), 1);
+
+    rp.core.set_pc(0x2000_0000);
+    rp.core.step();
+    assert_eq!(second.get(), 1);
 }
