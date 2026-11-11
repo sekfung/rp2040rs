@@ -42,18 +42,11 @@ files so the upstream-ported unit count stays at 322.
 The 322-case baseline comes from a `vitest run src` execution of the pinned
 upstream commit, so it is the reference figure for this map.
 
-While writing this map, a static count of the vendored pinned tree was also
-performed for the two files defined in plan 2:
-
-- `instructions.spec.ts` declares 126 `it(...)` cases.
-- `rp2040.spec.ts` declares 16 `it(...)` entries, two of which are
-  `it.each(regions)` over a three-element table, i.e. 20 expanded cases
-  statically.
-
-That static reading gives 320 rather than 322. The difference is confined to
-`rp2040.spec.ts` and must be re-confirmed with a real `vitest run src` when the
-upstream toolchain is available; plan 2 should adopt whichever per-file number
-that run reports.
+The per-file figures above are expanded vitest counts, not counts of textual
+`it(...)` declarations. `instructions.spec.ts` contributes 126 cases, and
+`rp2040.spec.ts` contributes 22: 16 plain `it()` cases plus 6 cases from two
+`it.each(regions)` tables over three-element lists. Across all 14 spec files,
+316 plain cases plus 6 `it.each` expansions give the 322-case total.
 
 ## Documented shape differences
 
