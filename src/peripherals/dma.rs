@@ -345,7 +345,7 @@ impl Dma {
                 if ctrl & INCR_READ != 0 {
                     if ring_mask != 0 && ctrl & RING_SEL == 0 {
                         channel.read_addr = (channel.read_addr & !ring_mask)
-                            | ((channel.read_addr + data_size) & ring_mask);
+                            | (channel.read_addr.wrapping_add(data_size) & ring_mask);
                     } else {
                         channel.read_addr = channel.read_addr.wrapping_add(data_size);
                     }
@@ -353,7 +353,7 @@ impl Dma {
                 if ctrl & INCR_WRITE != 0 {
                     if ring_mask != 0 && ctrl & RING_SEL != 0 {
                         channel.write_addr = (channel.write_addr & !ring_mask)
-                            | ((channel.write_addr + data_size) & ring_mask);
+                            | (channel.write_addr.wrapping_add(data_size) & ring_mask);
                     } else {
                         channel.write_addr = channel.write_addr.wrapping_add(data_size);
                     }
@@ -575,14 +575,14 @@ impl Peripheral for Dma {
             }
             MULTI_CHAN_TRIGGER => {
                 for index in 0..12 {
-                    if value & (1 << index) != 0 {
+                    if atomic_value & (1 << index) != 0 {
                         self.start(index);
                     }
                 }
             }
             CHAN_ABORT => {
                 for index in 0..12 {
-                    if value & (1 << index) != 0 {
+                    if atomic_value & (1 << index) != 0 {
                         self.abort(index);
                     }
                 }

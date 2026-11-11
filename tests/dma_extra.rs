@@ -79,9 +79,71 @@ fn non_ctrl_writes_do_not_rearm_a_paced_transfer() {
         EN | INCR_READ | INCR_WRITE | (TREQ_TIMER0 << TREQ_SEL_SHIFT) | (2 << DATA_SIZE_SHIFT),
     );
 
-    clock.advance(4_000);
+    clock.advance(4);
     rp.write_u32(CH0_READ_ADDR, 0x2000_0000);
-    clock.advance(4_000);
+    clock.advance(4);
 
     assert_eq!(rp.read_u32(0x2000_0100), 0xdead_beef);
+}
+
+#[test]
+fn multi_chan_trigger_set_alias_starts_the_channel() {
+    let clock = Rc::new(MockClock::new());
+    let rp = Rp2040::with_clock(clock.clone());
+    rp.write_u32(0x2000_0000, 0x1234_5678);
+    rp.write_u32(CH0_READ_ADDR, 0x2000_0000);
+    rp.write_u32(CH0_WRITE_ADDR, 0x2000_0100);
+    rp.write_u32(CH0_TRANS_COUNT, 1);
+    rp.write_u32(
+        CH0_CTRL_TRIG,
+        EN | INCR_READ | INCR_WRITE | (0x3f << TREQ_SEL_SHIFT) | (2 << DATA_SIZE_SHIFT),
+    );
+    rp.write_u32(0x5000_0444, 1);
+    assert_eq!(rp.read_u32(CH0_CTRL_TRIG) & 1 << 24, 0);
+
+    rp.write_u32(0x5000_0430 | 0x2000, 1);
+    assert_ne!(rp.read_u32(CH0_CTRL_TRIG) & 1 << 24, 0);
+    clock.advance(1);
+
+    assert_eq!(rp.read_u32(0x2000_0100), 0x1234_5678);
+}
+
+#[test]
+fn chan_abort_xor_alias_uses_the_atomic_value() {
+    let clock = Rc::new(MockClock::new());
+    let rp = Rp2040::with_clock(clock.clone());
+    rp.write_u32(0x2000_0000, 0x1234_5678);
+    rp.write_u32(CH0_READ_ADDR, 0x2000_0000);
+    rp.write_u32(CH0_WRITE_ADDR, 0x2000_0100);
+    rp.write_u32(CH0_TRANS_COUNT, 1);
+    rp.write_u32(
+        CH0_CTRL_TRIG,
+        EN | INCR_READ | INCR_WRITE | (0x3f << TREQ_SEL_SHIFT) | (2 << DATA_SIZE_SHIFT),
+    );
+    assert_ne!(rp.read_u32(CH0_CTRL_TRIG) & 1 << 24, 0);
+
+    // The write-only CHAN_ABORT register reads as 0xffffffff, so XOR with 1
+    // clears bit 0 and leaves channel 0 running.
+    rp.write_u32(0x5000_0444 | 0x1000, 1);
+    assert_ne!(rp.read_u32(CH0_CTRL_TRIG) & 1 << 24, 0);
+    clock.advance(1);
+
+    assert_eq!(rp.read_u32(0x2000_0100), 0x1234_5678);
+}
+
+#[test]
+fn ring_mode_read_address_wraps_without_panicking() {
+    let clock = Rc::new(MockClock::new());
+    let rp = Rp2040::with_clock(clock.clone());
+    rp.write_u32(CH0_READ_ADDR, 0xffff_fffc);
+    rp.write_u32(CH0_WRITE_ADDR, 0x2000_0100);
+    rp.write_u32(CH0_TRANS_COUNT, 1);
+    rp.write_u32(
+        CH0_CTRL_TRIG,
+        EN | INCR_READ | INCR_WRITE | (0x3f << TREQ_SEL_SHIFT) | (2 << DATA_SIZE_SHIFT) | (4 << 6),
+    );
+
+    clock.advance(1);
+
+    assert_eq!(rp.read_u32(CH0_READ_ADDR), 0xffff_fff0);
 }
