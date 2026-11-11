@@ -8,12 +8,28 @@ const UARTIBRD: u32 = 0x24;
 const UARTFBRD: u32 = 0x28;
 const UARTLCR_H: u32 = 0x2c;
 
+type BaudCallback = Box<dyn FnMut(u32)>;
+type BaudCallbackSlot = Rc<RefCell<Option<BaudCallback>>>;
+
 struct UartState {
     ibrd: u32,
     fbrd: u32,
     lcr_h: u32,
     baud_rate: u32,
-    on_baud_rate_change: Option<Box<dyn FnMut(u32)>>,
+    on_baud_rate_change: BaudCallbackSlot,
+}
+
+struct BaudCallbackGuard<'a> {
+    slot: &'a RefCell<Option<BaudCallback>>,
+    callback: Option<BaudCallback>,
+}
+
+impl Drop for BaudCallbackGuard<'_> {
+    fn drop(&mut self) {
+        if self.slot.borrow().is_none() {
+            *self.slot.borrow_mut() = self.callback.take();
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -32,7 +48,7 @@ impl Uart {
                 fbrd: 0,
                 lcr_h: 0,
                 baud_rate: 0,
-                on_baud_rate_change: None,
+                on_baud_rate_change: Rc::new(RefCell::new(None)),
             })),
             board,
         }
@@ -47,7 +63,7 @@ impl Uart {
     }
 
     pub fn set_on_baud_rate_change(&self, callback: Box<dyn FnMut(u32)>) {
-        self.state.borrow_mut().on_baud_rate_change = Some(callback);
+        *self.state.borrow().on_baud_rate_change.borrow_mut() = Some(callback);
     }
 
     pub fn clk_peri_changed(&self, clk_peri: f64) {
@@ -63,14 +79,20 @@ impl Uart {
         if !divider_set {
             return;
         }
-        let callback = {
+        let slot = {
             let mut state = self.state.borrow_mut();
             state.baud_rate = baud_rate;
-            state.on_baud_rate_change.take()
+            state.on_baud_rate_change.clone()
         };
-        if let Some(mut callback) = callback {
-            callback(baud_rate);
-            self.state.borrow_mut().on_baud_rate_change = Some(callback);
+        let callback = slot.borrow_mut().take();
+        if let Some(callback) = callback {
+            let mut guard = BaudCallbackGuard {
+                slot: &slot,
+                callback: Some(callback),
+            };
+            if let Some(callback) = guard.callback.as_mut() {
+                callback(baud_rate);
+            }
         }
     }
 

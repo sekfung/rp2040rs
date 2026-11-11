@@ -19,6 +19,10 @@ pub const APB_START_ADDRESS: u32 = 0x4000_0000;
 pub const DPRAM_START_ADDRESS: u32 = 0x5010_0000;
 pub const SIO_START_ADDRESS: u32 = 0xd000_0000;
 
+pub type ClockListenerId = u64;
+pub type ClockListener = Box<dyn FnMut(f64, f64)>;
+type ClockListenerSlot = Rc<RefCell<Option<ClockListener>>>;
+
 const BOOTROM_SIZE: usize = 4 * 1024;
 const SRAM_SIZE: usize = 264 * 1024;
 const FLASH_SIZE: usize = 16 * 1024 * 1024;
@@ -115,7 +119,7 @@ pub struct BoardShared {
     pub rosc_freq: f64,
     pub clk_sys: f64,
     pub clk_peri: f64,
-    pub clock_listeners: BTreeMap<u64, Box<dyn FnMut(f64, f64)>>,
+    pub clock_listeners: BTreeMap<ClockListenerId, ClockListenerSlot>,
     pub next_clock_listener_id: u64,
     pub clocks: Option<Clocks>,
     pub pll_sys: Option<Pll>,
@@ -319,15 +323,17 @@ impl Rp2040 {
         self.update_clocks();
     }
 
-    pub fn add_clock_listener(&self, listener: Box<dyn FnMut(f64, f64)>) -> u64 {
+    pub fn add_clock_listener(&self, listener: ClockListener) -> ClockListenerId {
         let mut board = self.shared.borrow_mut();
         let id = board.next_clock_listener_id;
         board.next_clock_listener_id += 1;
-        board.clock_listeners.insert(id, listener);
+        board
+            .clock_listeners
+            .insert(id, Rc::new(RefCell::new(Some(listener))));
         id
     }
 
-    pub fn remove_clock_listener(&self, id: u64) -> bool {
+    pub fn remove_clock_listener(&self, id: ClockListenerId) -> bool {
         self.shared
             .borrow_mut()
             .clock_listeners
@@ -378,6 +384,22 @@ impl Default for Rp2040 {
     }
 }
 
+struct ClockListenerGuard<'a> {
+    shared: &'a Rc<RefCell<BoardShared>>,
+    id: ClockListenerId,
+    slot: ClockListenerSlot,
+    callback: Option<ClockListener>,
+}
+
+impl Drop for ClockListenerGuard<'_> {
+    fn drop(&mut self) {
+        let still_registered = self.shared.borrow().clock_listeners.contains_key(&self.id);
+        if still_registered {
+            *self.slot.borrow_mut() = self.callback.take();
+        }
+    }
+}
+
 pub(crate) fn update_clocks(shared: &Rc<RefCell<BoardShared>>) {
     let (clocks, pll_sys, pll_usb, pwm, uart, xosc_freq, rosc_freq, old_sys, old_peri, ppb) = {
         let board = shared.borrow();
@@ -410,11 +432,13 @@ pub(crate) fn update_clocks(shared: &Rc<RefCell<BoardShared>>) {
 
     let sys_changed = sys_freq != 0.0 && sys_freq != old_sys;
     if sys_changed {
-        let mut listeners = {
+        let listeners = {
             let mut board = shared.borrow_mut();
             board.clk_sys = sys_freq;
-            std::mem::take(&mut board.clock_listeners)
-                .into_iter()
+            board
+                .clock_listeners
+                .iter()
+                .map(|(id, slot)| (*id, slot.clone()))
                 .collect::<Vec<_>>()
         };
         if let Some(ppb) = ppb {
@@ -423,12 +447,22 @@ pub(crate) fn update_clocks(shared: &Rc<RefCell<BoardShared>>) {
         if let Some(pwm) = pwm.clone() {
             pwm.set_clock_freq(sys_freq);
         }
-        for (_, listener) in listeners.iter_mut() {
-            listener(sys_freq, old_sys);
-        }
-        let mut board = shared.borrow_mut();
-        for (id, listener) in listeners {
-            board.clock_listeners.entry(id).or_insert(listener);
+        for (id, slot) in listeners {
+            if !shared.borrow().clock_listeners.contains_key(&id) {
+                continue;
+            }
+            let callback = slot.borrow_mut().take();
+            if let Some(callback) = callback {
+                let mut guard = ClockListenerGuard {
+                    shared,
+                    id,
+                    slot,
+                    callback: Some(callback),
+                };
+                if let Some(callback) = guard.callback.as_mut() {
+                    callback(sys_freq, old_sys);
+                }
+            }
         }
     }
 
