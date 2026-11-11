@@ -82,6 +82,10 @@ impl Timer {
             .unwrap_or(0.0)
     }
 
+    fn now_micros_u32(&self) -> u32 {
+        self.now_micros() as u64 as u32
+    }
+
     fn int_status(&self) -> u32 {
         let state = self.state.borrow();
         (state.int_raw & state.int_enable) | state.int_force
@@ -138,10 +142,10 @@ impl Peripheral for Timer {
             TIMELR => {
                 let mut state = self.state.borrow_mut();
                 state.latched_high = (time / 2f64.powi(32)).floor() as u32;
-                time as u32
+                self.now_micros_u32()
             }
             TIMERAWH => (time / 2f64.powi(32)).floor() as u32,
-            TIMERAWL => time as u32,
+            TIMERAWL => self.now_micros_u32(),
             ALARM0..=0x1c => {
                 let index = ((offset - ALARM0) / 4) as usize;
                 self.state
@@ -178,8 +182,8 @@ impl Peripheral for Timer {
         match offset {
             ALARM0..=0x1c => {
                 let index = ((offset - ALARM0) / 4) as usize;
-                let now = self.now_micros();
-                let delta_micros = value.wrapping_sub(now as u32);
+                let now = self.now_micros_u32();
+                let delta_micros = value.wrapping_sub(now);
                 let mut state = self.state.borrow_mut();
                 if let Some(alarm) = state.alarms.get_mut(index) {
                     alarm.armed = true;

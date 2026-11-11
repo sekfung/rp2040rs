@@ -67,6 +67,12 @@ impl Uart {
     }
 
     pub fn clk_peri_changed(&self, clk_peri: f64) {
+        let state = self.state.borrow();
+        let divider = f64::from(state.ibrd) + f64::from(state.fbrd) / 64.0;
+        drop(state);
+        if divider == 0.0 {
+            return;
+        }
         self.recompute_baud(clk_peri);
     }
 
@@ -108,18 +114,15 @@ impl Uart {
     }
 
     fn recompute_baud(&self, clk_peri: f64) {
-        let (divider_set, baud_rate) = {
+        let baud_rate = {
             let state = self.state.borrow();
             let divider = f64::from(state.ibrd) + f64::from(state.fbrd) / 64.0;
             if divider == 0.0 {
-                (false, 0)
+                0
             } else {
-                (true, (clk_peri / (16.0 * divider)).round() as u32)
+                (clk_peri / (16.0 * divider)).round() as u32
             }
         };
-        if !divider_set {
-            return;
-        }
         let slot = {
             let mut state = self.state.borrow_mut();
             state.baud_rate = baud_rate;

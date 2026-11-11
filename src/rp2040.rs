@@ -327,6 +327,7 @@ impl Rp2040 {
 
     pub fn reset(&self) {
         self.core.reset();
+        self.pwm.reset();
         self.flash.fill(0xff);
     }
 

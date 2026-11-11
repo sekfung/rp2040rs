@@ -97,6 +97,21 @@ impl Pwm {
         }
     }
 
+    pub fn reset(&self) {
+        let mut state = self.state.borrow_mut();
+        for alarm in &mut state.alarms {
+            alarm.cancel();
+        }
+        state.csr = [0; 8];
+        state.div = [1 << 4; 8];
+        state.ctr = [0; 8];
+        state.cc = [0; 8];
+        state.top = [0xffff; 8];
+        state.int_raw = 0;
+        state.int_enable = 0;
+        state.int_force = 0;
+    }
+
     fn int_status(&self) -> u32 {
         let state = self.state.borrow();
         (state.int_raw & state.int_enable) | state.int_force
@@ -161,7 +176,8 @@ impl Pwm {
                 let enabled = state.csr[index] & CSR_EN != 0;
                 if enabled {
                     if atomic_value & CSR_PH_ADV != 0 {
-                        state.ctr[index] = state.ctr[index].wrapping_add(1) & 0xffff;
+                        let modulus = state.top[index].wrapping_add(1);
+                        state.ctr[index] = state.ctr[index].wrapping_add(1) % modulus;
                     }
                     if atomic_value & CSR_PH_RET != 0 {
                         state.ctr[index] = if state.ctr[index] == 0 {
@@ -194,10 +210,26 @@ impl Pwm {
 }
 
 fn pwm_wrap(state: &Rc<RefCell<PwmState>>, board: &Weak<RefCell<BoardShared>>, index: usize) {
-    {
+    let rearm = {
         let mut state = state.borrow_mut();
         state.int_raw |= 1 << index;
         state.ctr[index] = 0;
+        let enabled = state.csr[index] & CSR_EN != 0;
+        let top = state.top[index];
+        let freq = state.clock_freq;
+        if enabled && freq > 0.0 {
+            let alarm = state.alarms[index].clone();
+            Some((
+                alarm,
+                f64::from(top.wrapping_add(1)) * 1_000_000_000.0 / freq,
+            ))
+        } else {
+            None
+        }
+    };
+    if let Some((mut alarm, nanos)) = rearm {
+        alarm.schedule(nanos);
+        state.borrow_mut().alarms[index] = alarm;
     }
     if let Some(board) = board.upgrade() {
         let core = board.borrow().core.clone();
@@ -257,9 +289,15 @@ impl Peripheral for Pwm {
         }
         match offset {
             EN => {
+                let current = self.read_u32(EN);
+                let enabled_mask = if atomic_type == 0 {
+                    value
+                } else {
+                    atomic_update(current, atomic_type, value)
+                } & 0xff;
                 for index in 0..8 {
                     let old_enabled = self.state.borrow().csr[index] & CSR_EN != 0;
-                    let enabled = value & (1 << index) != 0;
+                    let enabled = enabled_mask & (1 << index) != 0;
                     {
                         let mut state = self.state.borrow_mut();
                         if enabled {
@@ -276,15 +314,33 @@ impl Peripheral for Pwm {
                 }
             }
             INTR => {
-                self.state.borrow_mut().int_raw &= !(value & 0xff);
+                let current = self.read_u32(INTR);
+                let clear_mask = if atomic_type == 0 {
+                    value
+                } else {
+                    atomic_update(current, atomic_type, value)
+                } & 0xff;
+                self.state.borrow_mut().int_raw &= !clear_mask;
                 self.check_interrupts();
             }
             INTE => {
-                self.state.borrow_mut().int_enable = value & 0xff;
+                let current = self.read_u32(INTE);
+                let atomic_value = if atomic_type == 0 {
+                    value
+                } else {
+                    atomic_update(current, atomic_type, value)
+                };
+                self.state.borrow_mut().int_enable = atomic_value & 0xff;
                 self.check_interrupts();
             }
             INTF => {
-                self.state.borrow_mut().int_force = value & 0xff;
+                let current = self.read_u32(INTF);
+                let atomic_value = if atomic_type == 0 {
+                    value
+                } else {
+                    atomic_update(current, atomic_type, value)
+                };
+                self.state.borrow_mut().int_force = atomic_value & 0xff;
                 self.check_interrupts();
             }
             _ => {}
