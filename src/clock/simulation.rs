@@ -116,6 +116,10 @@ impl Clock for SimulationClock {
             id,
         }
     }
+
+    fn nanos_to_next_alarm(&self) -> f64 {
+        SimulationClock::nanos_to_next_alarm(self)
+    }
 }
 
 pub(crate) fn schedule_alarm(clock: &Rc<RefCell<ClockState>>, id: u64, delta_nanos: f64) {

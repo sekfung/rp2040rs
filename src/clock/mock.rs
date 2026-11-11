@@ -30,4 +30,8 @@ impl Clock for MockClock {
     fn create_alarm(&self, callback: AlarmCallback) -> Alarm {
         self.inner.create_alarm(callback)
     }
+
+    fn nanos_to_next_alarm(&self) -> f64 {
+        self.inner.nanos_to_next_alarm()
+    }
 }
