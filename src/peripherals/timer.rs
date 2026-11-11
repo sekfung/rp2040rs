@@ -183,11 +183,11 @@ impl Peripheral for Timer {
             ALARM0..=0x1c => {
                 let index = ((offset - ALARM0) / 4) as usize;
                 let now = self.now_micros_u32();
-                let delta_micros = value.wrapping_sub(now);
+                let delta_micros = atomic_value.wrapping_sub(now);
                 let mut state = self.state.borrow_mut();
                 if let Some(alarm) = state.alarms.get_mut(index) {
                     alarm.armed = true;
-                    alarm.target_micros = value;
+                    alarm.target_micros = atomic_value;
                     alarm.alarm.schedule(f64::from(delta_micros) * 1000.0);
                 }
             }

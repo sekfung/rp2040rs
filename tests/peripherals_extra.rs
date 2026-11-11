@@ -18,6 +18,7 @@ const SIO: u32 = 0xd000_0000;
 const SPI0: u32 = 0x4003_c000;
 const I2C0: u32 = 0x4004_4000;
 const WATCHDOG: u32 = 0x4005_8000;
+const TIMER_BASE: u32 = 0x4005_4000;
 
 #[test]
 fn sysinfo_and_tbman_identity_registers_are_implemented() {
@@ -381,4 +382,22 @@ fn watchdog_counts_down_and_honors_atomic_aliases() {
     rp.write_u32(WATCHDOG + 0x0c, 1);
     rp.write_u32((WATCHDOG + 0x0c) | 0x2000, 2);
     assert_eq!(rp.read_u32(WATCHDOG + 0x0c), 3);
+}
+
+#[test]
+fn timer_alarm_writes_honor_atomic_aliases() {
+    let rp = Rp2040::new();
+    let alarm0 = TIMER_BASE + 0x10;
+    let armed = TIMER_BASE + 0x20;
+
+    rp.write_u32(alarm0, 0x100);
+    rp.write_u32(alarm0 | 0x2000, 0x1); // SET
+    assert_eq!(rp.read_u32(alarm0), 0x101);
+    assert_eq!(rp.read_u32(armed) & 1, 1);
+
+    rp.write_u32(alarm0 | 0x1000, 0x1); // XOR
+    assert_eq!(rp.read_u32(alarm0), 0x100);
+
+    rp.write_u32(alarm0 | 0x3000, 0x100); // CLEAR
+    assert_eq!(rp.read_u32(alarm0), 0);
 }

@@ -109,3 +109,44 @@ fn iobank0_funcsel_selects_the_active_output_source() {
     assert!(rp.gpio[0].raw_output_value());
     assert!(rp.gpio[0].raw_output_enable());
 }
+
+#[test]
+fn pwm_polarity_inverts_a_and_b_outputs() {
+    let clock = Rc::new(SimulationClock::new());
+    let rp = Rp2040::with_clock(clock.clone());
+    rp.write_u32(0x4001_4004, 4);
+    rp.write_u32(0x4001_400c, 4);
+    rp.write_u32(CH0_TOP, 4);
+    rp.write_u32(CH0_CC, 2);
+    rp.write_u32(CH0_CSR, CSR_EN | (1 << 2)); // A inverted
+    clock.tick(40.0);
+    assert!(!rp.gpio[0].raw_output_value());
+    assert!(!rp.gpio[1].raw_output_value());
+}
+
+#[test]
+fn pwm_divmode_gates_b_pin_direction() {
+    let clock = Rc::new(SimulationClock::new());
+    let rp = Rp2040::with_clock(clock.clone());
+    rp.write_u32(0x4001_4004, 4);
+    rp.write_u32(0x4001_400c, 4);
+    rp.write_u32(CH0_TOP, 4);
+    rp.write_u32(CH0_CSR, CSR_EN | (1 << 4)); // BGated
+    assert!(rp.gpio[0].raw_output_enable());
+    assert!(!rp.gpio[1].raw_output_enable());
+    rp.write_u32(CH0_CSR, CSR_EN); // FreeRunning
+    assert!(rp.gpio[1].raw_output_enable());
+}
+
+#[test]
+fn pwm_phase_correct_counts_down_after_top() {
+    let clock = Rc::new(SimulationClock::new());
+    let rp = Rp2040::with_clock(clock.clone());
+    rp.write_u32(CH0_TOP, 4);
+    rp.write_u32(CH0_CSR, CSR_EN | (1 << 1)); // PH_CORRECT
+    clock.tick(8.0 * 8.0);
+    assert_eq!(rp.read_u32(CH0_CTR), 1);
+    clock.tick(8.0 * 3.0);
+    assert_eq!(rp.read_u32(CH0_CTR), 1);
+    assert_eq!(rp.read_u32(PWM_INTR) & 1, 1);
+}
