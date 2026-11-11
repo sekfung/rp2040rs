@@ -128,7 +128,7 @@ impl Ppb {
             SHPR3 => self.core.set_shpr3(value),
             SYST_CSR => self.state.borrow_mut().systick_csr = value & 0x7,
             SYST_CVR => self.state.borrow_mut().systick_cvr = 0,
-            SYST_RVR => self.state.borrow_mut().systick_rvr = value & 0x00ff_ffff,
+            SYST_RVR => self.state.borrow_mut().systick_rvr = value,
             _ => {}
         }
     }

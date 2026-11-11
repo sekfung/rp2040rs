@@ -89,3 +89,20 @@ fn ppb_systick_and_icsr_registers_keep_state() {
     rp.write_u32(ICSR, PENDSVCLR);
     assert_eq!(rp.read_u32(ICSR) & PENDSVSET, 0);
 }
+
+#[test]
+fn nmi_is_taken_even_when_primask_is_set() {
+    let rp = Rp2040::new();
+    let core = &rp.core;
+    rp.write_u16(0x1000_0100, opcode_nop());
+    rp.write_u32(VTOR, 0x1000_0000);
+    rp.write_u32(0x1000_0000 + 2 * 4, 0x1000_0100);
+    core.set_pc(0x1000_4000);
+    core.write_special_register(SYSM_PRIMASK, 1);
+    rp.write_u32(ICSR, 1 << 31);
+
+    core.step();
+
+    assert_eq!(core.ipsr(), 2);
+    assert_eq!(core.pc(), 0x1000_0102);
+}

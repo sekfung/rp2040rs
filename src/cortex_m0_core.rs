@@ -520,14 +520,14 @@ impl Core {
             self.exception_priority(ipsr)
                 .min(if pm { 0 } else { LOWEST_PRIORITY as i32 })
         };
-        if current_priority <= 0 {
-            self.state.borrow_mut().interrupts_updated = false;
-            return false;
-        }
         if self.pending_nmi() {
             self.set_pending_nmi(false);
             self.exception_entry(2);
             return true;
+        }
+        if current_priority <= 0 {
+            self.state.borrow_mut().interrupts_updated = false;
+            return false;
         }
         let interrupt_set = pending & enabled;
         let svc_priority = self.svc_priority();
