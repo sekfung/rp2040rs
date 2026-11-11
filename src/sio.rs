@@ -2,6 +2,7 @@ use std::cell::RefCell;
 use std::rc::{Rc, Weak};
 
 use crate::cortex_m0_core::Core;
+use crate::gpio_pin::SOURCE_SIO;
 use crate::interpolator::Interpolator;
 use crate::rp2040::BoardShared;
 
@@ -148,7 +149,8 @@ impl Sio {
         if let Some(board) = self.board.upgrade() {
             let board = board.borrow();
             for (index, pin) in board.gpio.iter().enumerate() {
-                pin.set_output(
+                pin.set_source_output(
+                    SOURCE_SIO,
                     output & (1 << index) != 0,
                     output_enable & (1 << index) != 0,
                 );

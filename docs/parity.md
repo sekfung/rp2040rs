@@ -98,8 +98,10 @@ The per-file figures above are expanded vitest counts, not counts of textual
   the Rust port computes the hardware-correct `V=true`, while upstream
   `substractUpdateFlags` computes `V=false`. No ported test observes this;
   documented as a source-level deviation.
-- PIO `FJOIN_RX/TX` semantics and `SM_CLKDIV`/`CLKDIV_RESTART` pacing are not
-  implemented; upstream has the same gaps and no ported test asserts them.
+- GPIO output is tracked per source (PWM/SIO/PIO0/PIO1) and resolved through
+  IO_BANK0 FUNCSEL, matching upstream `gpio-pin.ts`. PIO `FJOIN_TX`, the full
+  eight-entry shared FIFO, and per-SM `SM_CLKDIV`/`CLKDIV_RESTART` pacing are
+  not implemented; upstream has the same gaps and no ported test asserts them.
 - PIO DMA DREQ signaling and the full GPIO pad/function model are deferred to
   Plan 4; PIO-driven input values are propagated. Plan 4 also owns PWM
   output/direction propagation to GPIO (upstream `gpioValue`/`gpioDirection`

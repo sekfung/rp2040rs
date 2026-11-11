@@ -220,6 +220,13 @@ impl Dma {
         self.state.borrow_mut().dreq[channel as usize] = false;
     }
 
+    /// Pulse a level-sensitive DREQ line. Unlike `set_dreq`, this re-arms
+    /// channels that are already waiting, matching a peripheral wrap event.
+    pub fn pulse_dreq(&self, channel: DreqChannel) {
+        self.set_dreq(channel);
+        self.clear_dreq(channel);
+    }
+
     fn start(&self, index: u32) {
         let count = {
             let mut state = self.state.borrow_mut();

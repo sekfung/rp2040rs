@@ -1,6 +1,16 @@
 use std::cell::Cell;
 use std::rc::Rc;
 
+pub const FUNCTION_PWM: u32 = 4;
+pub const FUNCTION_SIO: u32 = 5;
+pub const FUNCTION_PIO0: u32 = 6;
+pub const FUNCTION_PIO1: u32 = 7;
+
+pub const SOURCE_PWM: usize = 0;
+pub const SOURCE_SIO: usize = 1;
+pub const SOURCE_PIO0: usize = 2;
+pub const SOURCE_PIO1: usize = 3;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum GpioPinState {
     Low,
@@ -37,8 +47,8 @@ pub struct GpioPin {
     irq_force_mask: Rc<Cell<u32>>,
     irq_status: Rc<Cell<u32>>,
     last_state: Rc<Cell<GpioPinState>>,
-    raw_output_value: Rc<Cell<bool>>,
-    raw_output_enable: Rc<Cell<bool>>,
+    source_output_value: Rc<[Cell<u32>; 4]>,
+    source_output_enable: Rc<[Cell<u32>; 4]>,
 }
 
 impl GpioPin {
@@ -52,8 +62,8 @@ impl GpioPin {
             irq_force_mask: Rc::new(Cell::new(0)),
             irq_status: Rc::new(Cell::new(0)),
             last_state: Rc::new(Cell::new(GpioPinState::Input)),
-            raw_output_value: Rc::new(Cell::new(false)),
-            raw_output_enable: Rc::new(Cell::new(false)),
+            source_output_value: Rc::new(std::array::from_fn(|_| Cell::new(0))),
+            source_output_enable: Rc::new(std::array::from_fn(|_| Cell::new(0))),
         }
     }
 
@@ -102,26 +112,66 @@ impl GpioPin {
         apply_override(value, (self.ctrl.get() >> 16) & 0x3)
     }
 
+    fn active_source(&self) -> Option<usize> {
+        match self.function_select() {
+            FUNCTION_PWM => Some(SOURCE_PWM),
+            FUNCTION_SIO => Some(SOURCE_SIO),
+            FUNCTION_PIO0 => Some(SOURCE_PIO0),
+            FUNCTION_PIO1 => Some(SOURCE_PIO1),
+            _ => None,
+        }
+    }
+
+    /// Update one peripheral's contribution to this pin. The effective pad
+    /// output is selected by IO_BANK0 FUNCSEL, matching upstream gpio-pin.ts.
+    pub fn set_source_output(&self, source: usize, value: bool, enable: bool) {
+        let bit = 1u32 << self.index;
+        let value_cell = &self.source_output_value[source];
+        let enable_cell = &self.source_output_enable[source];
+        if value {
+            value_cell.set(value_cell.get() | bit);
+        } else {
+            value_cell.set(value_cell.get() & !bit);
+        }
+        if enable {
+            enable_cell.set(enable_cell.get() | bit);
+            self.raw_input_value.set(value);
+        } else {
+            enable_cell.set(enable_cell.get() & !bit);
+        }
+    }
+
+    pub fn clear_source_output(&self, source: usize) {
+        let bit = 1u32 << self.index;
+        let value_cell = &self.source_output_value[source];
+        let enable_cell = &self.source_output_enable[source];
+        value_cell.set(value_cell.get() & !bit);
+        enable_cell.set(enable_cell.get() & !bit);
+    }
+
+    /// Legacy alias used by the SIO path before function selection was added.
     pub fn set_output(&self, value: bool, enable: bool) {
-        self.raw_output_value.set(value);
-        self.raw_output_enable.set(enable);
-        self.raw_input_value.set(value);
+        self.set_source_output(SOURCE_SIO, value, enable);
     }
 
     pub fn raw_output_value(&self) -> bool {
-        self.raw_output_value.get()
+        self.active_source()
+            .map(|source| self.source_output_value[source].get() & (1u32 << self.index) != 0)
+            .unwrap_or(false)
     }
 
     pub fn raw_output_enable(&self) -> bool {
-        self.raw_output_enable.get()
+        self.active_source()
+            .map(|source| self.source_output_enable[source].get() & (1u32 << self.index) != 0)
+            .unwrap_or(false)
     }
 
     pub fn output_value(&self) -> bool {
-        apply_override(self.raw_output_value.get(), (self.ctrl.get() >> 8) & 0x3)
+        apply_override(self.raw_output_value(), (self.ctrl.get() >> 8) & 0x3)
     }
 
     pub fn output_enable(&self) -> bool {
-        apply_override(self.raw_output_enable.get(), (self.ctrl.get() >> 12) & 0x3)
+        apply_override(self.raw_output_enable(), (self.ctrl.get() >> 12) & 0x3)
     }
 
     pub fn irq_enable_mask(&self) -> u32 {
@@ -167,13 +217,13 @@ impl GpioPin {
         if self.output_enable() {
             status |= 1 << 13;
         }
-        if self.raw_output_enable.get() {
+        if self.raw_output_enable() {
             status |= 1 << 12;
         }
         if self.output_value() {
             status |= 1 << 9;
         }
-        if self.raw_output_value.get() {
+        if self.raw_output_value() {
             status |= 1 << 8;
         }
         status

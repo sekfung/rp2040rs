@@ -2,6 +2,7 @@ use std::cell::RefCell;
 use std::rc::{Rc, Weak};
 
 use crate::clock::Alarm;
+use crate::gpio_pin::{SOURCE_PIO0, SOURCE_PIO1};
 use crate::peripherals::dma::DreqChannel;
 use crate::peripherals::{atomic_update, Peripheral};
 use crate::rp2040::BoardShared;
@@ -356,9 +357,21 @@ impl Pio {
             for index in 0..30 {
                 let bit = 1u32 << index;
                 if changed & bit != 0 && directions & bit != 0 {
-                    board.gpio[index].set_output(values & bit != 0, true);
+                    board.gpio[index].set_source_output(
+                        if self.index == 0 {
+                            SOURCE_PIO0
+                        } else {
+                            SOURCE_PIO1
+                        },
+                        values & bit != 0,
+                        true,
+                    );
                 } else if changed & bit != 0 {
-                    board.gpio[index].set_output(false, false);
+                    board.gpio[index].clear_source_output(if self.index == 0 {
+                        SOURCE_PIO0
+                    } else {
+                        SOURCE_PIO1
+                    });
                 }
             }
         }
@@ -1051,7 +1064,11 @@ impl Pio {
             board.core.set_interrupt(self.first_irq, false);
             board.core.set_interrupt(self.first_irq + 1, false);
             for pin in &board.gpio {
-                pin.set_output(false, false);
+                pin.clear_source_output(if self.index == 0 {
+                    SOURCE_PIO0
+                } else {
+                    SOURCE_PIO1
+                });
             }
         }
     }

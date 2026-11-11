@@ -2,6 +2,7 @@ use std::cell::RefCell;
 use std::rc::{Rc, Weak};
 
 use crate::clock::Alarm;
+use crate::gpio_pin::SOURCE_PWM;
 use crate::irq::Irq;
 use crate::peripherals::dma::DreqChannel;
 use crate::peripherals::peripheral::{atomic_update, Peripheral};
@@ -176,7 +177,7 @@ impl Pwm {
         if let Some(board) = self.board.upgrade() {
             if let Some(gpio) = board.borrow().gpio.get(pin) {
                 let value = gpio.raw_output_value();
-                gpio.set_output(value, output);
+                gpio.set_source_output(SOURCE_PWM, value, output);
             }
         }
     }
@@ -353,17 +354,17 @@ fn pwm_tick(state: &Rc<RefCell<PwmState>>, board: &Weak<RefCell<BoardShared>>, i
     if wrapped {
         if let Some(board) = board.upgrade() {
             if let Some(gpio) = board.borrow().gpio.get(index * 2) {
-                gpio.set_output(cc & 0xffff != 0, true);
+                gpio.set_source_output(SOURCE_PWM, cc & 0xffff != 0, true);
             }
             if let Some(gpio) = board.borrow().gpio.get(index * 2 + 1) {
-                gpio.set_output(cc >> 16 != 0, true);
+                gpio.set_source_output(SOURCE_PWM, cc >> 16 != 0, true);
             }
             if index < 7 {
                 if let Some(gpio) = board.borrow().gpio.get(16 + index * 2) {
-                    gpio.set_output(cc & 0xffff != 0, true);
+                    gpio.set_source_output(SOURCE_PWM, cc & 0xffff != 0, true);
                 }
                 if let Some(gpio) = board.borrow().gpio.get(17 + index * 2) {
-                    gpio.set_output(cc >> 16 != 0, true);
+                    gpio.set_source_output(SOURCE_PWM, cc >> 16 != 0, true);
                 }
             }
             let dma = board.borrow().dma.clone();
@@ -378,28 +379,28 @@ fn pwm_tick(state: &Rc<RefCell<PwmState>>, board: &Weak<RefCell<BoardShared>>, i
                     6 => DreqChannel::PwmWrap6,
                     _ => DreqChannel::PwmWrap7,
                 };
-                dma.set_dreq(channel);
+                dma.pulse_dreq(channel);
             }
         }
     } else {
         if let Some(board) = board.upgrade() {
             if ctr == (cc & 0xffff) {
                 if let Some(gpio) = board.borrow().gpio.get(index * 2) {
-                    gpio.set_output(false, true);
+                    gpio.set_source_output(SOURCE_PWM, false, true);
                 }
                 if index < 7 {
                     if let Some(gpio) = board.borrow().gpio.get(16 + index * 2) {
-                        gpio.set_output(false, true);
+                        gpio.set_source_output(SOURCE_PWM, false, true);
                     }
                 }
             }
             if ctr == (cc >> 16) {
                 if let Some(gpio) = board.borrow().gpio.get(index * 2 + 1) {
-                    gpio.set_output(false, true);
+                    gpio.set_source_output(SOURCE_PWM, false, true);
                 }
                 if index < 7 {
                     if let Some(gpio) = board.borrow().gpio.get(17 + index * 2) {
-                        gpio.set_output(false, true);
+                        gpio.set_source_output(SOURCE_PWM, false, true);
                     }
                 }
             }
