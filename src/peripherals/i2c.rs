@@ -96,6 +96,11 @@ struct I2cStateMachine {
     int_raw: u32,
     int_enable: u32,
     spike_len: u32,
+    on_start: Option<Box<dyn FnMut()>>,
+    on_connect: Option<Box<dyn FnMut(u32, bool) -> bool>>,
+    on_write: Option<Box<dyn FnMut(u32) -> bool>>,
+    on_read: Option<Box<dyn FnMut() -> u32>>,
+    on_stop: Option<Box<dyn FnMut()>>,
 }
 
 impl I2c {
@@ -124,10 +129,35 @@ impl I2c {
                 int_raw: 0,
                 int_enable: 0,
                 spike_len: 7,
+                on_start: None,
+                on_connect: None,
+                on_write: None,
+                on_read: None,
+                on_stop: None,
             })),
             board: _board,
             irq: irq as u32,
         }
+    }
+
+    pub fn set_on_start(&self, callback: Box<dyn FnMut()>) {
+        self.state.borrow_mut().on_start = Some(callback);
+    }
+
+    pub fn set_on_connect(&self, callback: Box<dyn FnMut(u32, bool) -> bool>) {
+        self.state.borrow_mut().on_connect = Some(callback);
+    }
+
+    pub fn set_on_write(&self, callback: Box<dyn FnMut(u32) -> bool>) {
+        self.state.borrow_mut().on_write = Some(callback);
+    }
+
+    pub fn set_on_read(&self, callback: Box<dyn FnMut() -> u32>) {
+        self.state.borrow_mut().on_read = Some(callback);
+    }
+
+    pub fn set_on_stop(&self, callback: Box<dyn FnMut()>) {
+        self.state.borrow_mut().on_stop = Some(callback);
     }
 
     fn int_status(&self) -> u32 {
@@ -177,7 +207,7 @@ impl I2c {
     }
 
     fn next_command(&self) {
-        let (enabled, blocked, empty, busy, restart) = {
+        let (enabled, blocked, empty, busy, restart, idle) = {
             let state = self.state.borrow();
             (
                 state.enable & ENABLE != 0,
@@ -185,12 +215,13 @@ impl I2c {
                 state.tx_fifo.empty(),
                 state.busy,
                 !state.stop && (state.tx_fifo.peek() & RESTART) != 0,
+                state.state == I2cState::Idle,
             )
         };
         if empty || busy || blocked || !enabled {
             return;
         }
-        if restart && !self.state.borrow().pending_restart {
+        if (idle || restart) && !self.state.borrow().pending_restart {
             let mut state = self.state.borrow_mut();
             state.pending_restart = true;
             state.stop = false;
@@ -206,7 +237,7 @@ impl I2c {
         if read_mode {
             self.complete_read(0xff);
         } else {
-            self.complete_write(true);
+            self.complete_write(true, cmd & 0xff);
         }
         let threshold = self.state.borrow().tx_threshold;
         if self.state.borrow().tx_fifo.item_count() as u32 <= threshold {
@@ -224,12 +255,22 @@ impl I2c {
         }
         self.state.borrow_mut().state = I2cState::Connect;
         self.set_interrupts(R_START_DET);
-        let _ = (target, mode_read);
-        self.complete_connect(true);
+        let mut callback = self.state.borrow_mut().on_start.take();
+        if let Some(callback) = callback.as_mut() {
+            callback();
+        }
+        self.state.borrow_mut().on_start = callback;
+        let mut connect = self.state.borrow_mut().on_connect.take();
+        let ack = match connect.as_mut() {
+            Some(callback) => callback(target, mode_read),
+            None => true,
+        };
+        self.state.borrow_mut().on_connect = connect;
+        self.complete_connect(ack);
     }
 
     fn complete_connect(&self, ack: bool) {
-        if !ack || self.state.borrow().stop {
+        if !ack {
             self.abort(1);
             self.complete_stop();
             return;
@@ -243,8 +284,14 @@ impl I2c {
         self.next_command();
     }
 
-    fn complete_write(&self, ack: bool) {
-        if !ack || self.state.borrow().stop {
+    fn complete_write(&self, ack: bool, value: u32) {
+        let mut callback = self.state.borrow_mut().on_write.take();
+        let ack = match callback.as_mut() {
+            Some(callback) => callback(value),
+            None => ack,
+        };
+        self.state.borrow_mut().on_write = callback;
+        if !ack {
             self.abort(1 << 3);
             self.complete_stop();
             return;
@@ -254,6 +301,12 @@ impl I2c {
     }
 
     fn complete_read(&self, value: u32) {
+        let mut callback = self.state.borrow_mut().on_read.take();
+        let value = match callback.as_mut() {
+            Some(callback) => callback(),
+            None => value,
+        };
+        self.state.borrow_mut().on_read = callback;
         {
             let mut state = self.state.borrow_mut();
             let first_byte = state.first_byte;
@@ -263,8 +316,12 @@ impl I2c {
                 state
                     .rx_fifo
                     .push(value | if first_byte { FIRST_DATA_BYTE } else { 0 });
+                if state.rx_fifo.item_count() as u32 > state.rx_threshold {
+                    state.int_raw |= R_RX_FULL;
+                }
             }
         }
+        self.check_interrupts();
         if self.state.borrow().stop {
             self.complete_stop();
             return;
@@ -284,6 +341,11 @@ impl I2c {
                 state.enable &= !ABORT;
             }
         }
+        let mut callback = self.state.borrow_mut().on_stop.take();
+        if let Some(callback) = callback.as_mut() {
+            callback();
+        }
+        self.state.borrow_mut().on_stop = callback;
         self.set_interrupts(R_STOP_DET);
         self.next_command();
     }
@@ -360,11 +422,10 @@ impl Peripheral for I2c {
     }
 
     fn write_u32_atomic(&self, offset: u32, value: u32, atomic_type: u32) {
-        let current = self.read_u32(offset);
         let value = if atomic_type == 0 {
             value
         } else {
-            atomic_update(current, atomic_type, value)
+            atomic_update(self.read_u32(offset), atomic_type, value)
         };
         match offset {
             IC_CON => {

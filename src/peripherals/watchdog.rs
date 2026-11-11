@@ -1,8 +1,8 @@
 use std::cell::RefCell;
 use std::rc::{Rc, Weak};
 
-use crate::clock::Alarm;
-use crate::peripherals::peripheral::Peripheral;
+use crate::clock::{Alarm, Clock};
+use crate::peripherals::peripheral::{atomic_update, Peripheral};
 use crate::rp2040::BoardShared;
 
 const CTRL: u32 = 0x00;
@@ -26,6 +26,7 @@ const TICK_FREQUENCY: f64 = 2_000_000.0;
 pub struct Watchdog {
     name: String,
     state: Rc<RefCell<WatchdogState>>,
+    clock: Rc<dyn Clock>,
 }
 
 struct WatchdogState {
@@ -40,6 +41,7 @@ struct WatchdogState {
     scratch: [u32; 8],
     alarm: Alarm,
     on_trigger: Option<Box<dyn FnMut()>>,
+    armed_at_nanos: f64,
 }
 
 impl Watchdog {
@@ -60,20 +62,26 @@ impl Watchdog {
             scratch: [0; 8],
             alarm: clock.create_alarm(Box::new(|| {})),
             on_trigger: None,
+            armed_at_nanos: 0.0,
         }));
         let state_for_alarm = state.clone();
         let alarm = clock.create_alarm(Box::new(move || {
-            let mut state = state_for_alarm.borrow_mut();
-            state.reason = REASON_TIMER;
-            state.enable = false;
-            if let Some(callback) = state.on_trigger.as_mut() {
+            let mut callback = {
+                let mut state = state_for_alarm.borrow_mut();
+                state.reason = REASON_TIMER;
+                state.counter = 0;
+                state.on_trigger.take()
+            };
+            if let Some(callback) = callback.as_mut() {
                 callback();
             }
+            state_for_alarm.borrow_mut().on_trigger = callback;
         }));
         state.borrow_mut().alarm = alarm;
         Self {
             name: name.into(),
             state,
+            clock,
         }
     }
 
@@ -88,6 +96,7 @@ impl Watchdog {
         };
         let mut state = self.state.borrow_mut();
         state.alarm.cancel();
+        state.armed_at_nanos = self.clock.nanos();
         if enable && tick_enable {
             let nanos = f64::from(load & TIME_MASK) * 1_000_000_000.0 / TICK_FREQUENCY;
             state.alarm.schedule(nanos.max(1.0));
@@ -104,11 +113,18 @@ impl Peripheral for Watchdog {
         let state = self.state.borrow();
         match offset {
             CTRL => {
+                let elapsed = (self.clock.nanos() - state.armed_at_nanos).max(0.0);
+                let ticks = (elapsed * TICK_FREQUENCY / 1_000_000_000.0) as u32;
+                let remaining = if state.enable {
+                    state.load.saturating_sub(ticks) & TIME_MASK
+                } else {
+                    state.counter & TIME_MASK
+                };
                 (u32::from(state.enable) * ENABLE)
                     | (u32::from(state.pause_dbg0) * PAUSE_DBG0)
                     | (u32::from(state.pause_dbg1) * PAUSE_DBG1)
                     | (u32::from(state.pause_jtag) * PAUSE_JTAG)
-                    | (state.counter & TIME_MASK)
+                    | remaining
             }
             LOAD => state.load,
             REASON => state.reason,
@@ -124,7 +140,12 @@ impl Peripheral for Watchdog {
         }
     }
 
-    fn write_u32_atomic(&self, offset: u32, value: u32, _atomic_type: u32) {
+    fn write_u32_atomic(&self, offset: u32, value: u32, atomic_type: u32) {
+        let value = if atomic_type == 0 {
+            value
+        } else {
+            atomic_update(self.read_u32(offset), atomic_type, value)
+        };
         match offset {
             CTRL => {
                 let mut state = self.state.borrow_mut();

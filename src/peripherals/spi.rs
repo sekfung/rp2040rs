@@ -98,7 +98,7 @@ impl Spi {
     }
 
     fn fifos_updated(&self) {
-        let status = {
+        {
             let mut state = self.state.borrow_mut();
             if state.tx_fifo.item_count() <= state.tx_fifo.size() / 2 {
                 state.int_raw |= SSPTXINTR;
@@ -110,30 +110,26 @@ impl Spi {
             } else {
                 state.int_raw &= !SSPRXINTR;
             }
-            state.int_raw & state.int_enable
-        };
-        if status != 0 {
-            self.check_interrupts();
         }
+        self.check_interrupts();
     }
 
     fn do_tx(&self) {
         let value = {
             let mut state = self.state.borrow_mut();
-            if state.busy || state.tx_fifo.empty() {
+            if state.busy || state.tx_fifo.empty() || state.control1 & 2 == 0 {
                 return;
             }
             let value = state.tx_fifo.pull() as u8;
             state.busy = true;
             value
         };
-        let response = {
-            let mut state = self.state.borrow_mut();
-            match state.on_transmit.as_mut() {
-                Some(callback) => callback(value),
-                None => 0,
-            }
+        let mut callback = self.state.borrow_mut().on_transmit.take();
+        let response = match callback.as_mut() {
+            Some(callback) => callback(value),
+            None => 0,
         };
+        self.state.borrow_mut().on_transmit = callback;
         self.complete_transmit(response);
     }
 
@@ -198,11 +194,10 @@ impl Peripheral for Spi {
     }
 
     fn write_u32_atomic(&self, offset: u32, value: u32, atomic_type: u32) {
-        let current = self.read_u32(offset);
         let value = if atomic_type == 0 {
             value
         } else {
-            atomic_update(current, atomic_type, value)
+            atomic_update(self.read_u32(offset), atomic_type, value)
         };
         match offset {
             SSPCR0 => self.state.borrow_mut().control0 = value,

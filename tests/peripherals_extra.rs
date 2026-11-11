@@ -133,6 +133,19 @@ const SSI: u32 = 0x1800_0000;
 const RTC: u32 = 0x4005_c000;
 const WATCHDOG: u32 = 0x4005_8000;
 
+const ADC_CS: u32 = ADC;
+const ADC_FCS: u32 = ADC + 0x08;
+const ADC_RESULT: u32 = ADC + 0x04;
+const I2C_DATA_CMD: u32 = I2C0 + 0x10;
+const I2C_RAW_INTR: u32 = I2C0 + 0x34;
+const I2C_INTR_MASK: u32 = I2C0 + 0x30;
+const I2C_ENABLE: u32 = I2C0 + 0x6c;
+const I2C_RXFLR: u32 = I2C0 + 0x78;
+const I2C_CLR_INTR: u32 = I2C0 + 0x40;
+const SPI_DR: u32 = SPI0 + 0x08;
+const SPI_IMSC: u32 = SPI0 + 0x14;
+const SPI_MIS: u32 = SPI0 + 0x1c;
+
 #[test]
 fn adc_conversion_reaches_result_and_fifo() {
     let clock = Rc::new(MockClock::new());
@@ -201,4 +214,98 @@ fn watchdog_scratch_and_forced_trigger() {
     rp.write_u32(WATCHDOG, 1 << 31); // TRIGGER
     assert!(fired.get());
     assert_eq!(rp.read_u32(WATCHDOG + 0x08) & 2, 2);
+}
+
+#[test]
+fn adc_honors_ainsel_channel() {
+    let clock = Rc::new(MockClock::new());
+    let rp = Rp2040::with_clock(clock.clone());
+    rp.adc.set_channel_value(1, 0x321);
+    rp.write_u32(ADC_FCS, 1);
+    rp.write_u32(ADC_CS, 1 | (1 << 2) | (1 << 12));
+    clock.advance(3);
+    assert_eq!(rp.read_u32(ADC_RESULT), 0x321);
+}
+
+#[test]
+fn spi_normal_write_does_not_consume_rx_fifo() {
+    let rp = Rp2040::new();
+    rp.write_u32(SPI0, 7);
+    rp.write_u32(SPI0 + 0x04, 2);
+    rp.spi[0].set_on_transmit(Box::new(|value| value));
+    rp.write_u32(SPI_DR, 0xaa);
+    rp.write_u32(SPI_DR, 0xbb);
+    assert_eq!(rp.read_u32(SPI_DR) & 0xff, 0xaa);
+    assert_eq!(rp.read_u32(SPI_DR) & 0xff, 0xbb);
+}
+
+#[test]
+fn i2c_normal_write_does_not_set_rx_under() {
+    let rp = Rp2040::new();
+    rp.write_u32(I2C_ENABLE, 1);
+    rp.write_u32(I2C_DATA_CMD, 0x55);
+    assert_eq!(rp.read_u32(I2C_RAW_INTR) & 1, 0);
+}
+
+#[test]
+fn i2c_master_callbacks_drive_write_read_and_stop() {
+    let rp = Rp2040::new();
+    let started = Rc::new(Cell::new(false));
+    let connected = Rc::new(Cell::new(false));
+    let wrote = Rc::new(Cell::new(false));
+    let stopped = Rc::new(Cell::new(false));
+    let s = started.clone();
+    let c = connected.clone();
+    let w = wrote.clone();
+    let p = stopped.clone();
+    rp.i2c[0].set_on_start(Box::new(move || s.set(true)));
+    rp.i2c[0].set_on_connect(Box::new(move |_addr, _read| {
+        c.set(true);
+        true
+    }));
+    rp.i2c[0].set_on_write(Box::new(move |_value| {
+        w.set(true);
+        true
+    }));
+    rp.i2c[0].set_on_read(Box::new(|| 0x5a));
+    rp.i2c[0].set_on_stop(Box::new(move || p.set(true)));
+
+    rp.write_u32(I2C_INTR_MASK, 0xffff);
+    rp.write_u32(I2C_ENABLE, 1);
+    rp.write_u32(I2C_DATA_CMD, 0x33); // write 0x33
+    rp.write_u32(I2C_DATA_CMD, (1 << 8) | (1 << 9)); // read + STOP
+
+    assert!(started.get());
+    assert!(connected.get());
+    assert!(wrote.get());
+    assert!(stopped.get());
+    assert_eq!(rp.read_u32(I2C_RAW_INTR) & (1 << 2), 1 << 2);
+    assert_eq!(rp.read_u32(I2C_RXFLR), 1);
+    assert_eq!(rp.read_u32(I2C_DATA_CMD) & 0xff, 0x5a);
+    let _ = rp.read_u32(I2C_CLR_INTR);
+    assert_eq!(rp.read_u32(I2C_RAW_INTR), 0);
+}
+
+#[test]
+fn spi_interrupt_deasserts_when_fifo_status_clears() {
+    let rp = Rp2040::new();
+    rp.write_u32(SPI_IMSC, 1 << 3);
+    for _ in 0..5 {
+        rp.write_u32(SPI_DR, 0);
+    }
+    assert_eq!(rp.read_u32(SPI_MIS) & (1 << 3), 0);
+}
+
+#[test]
+fn watchdog_counts_down_and_honors_atomic_aliases() {
+    let clock = Rc::new(MockClock::new());
+    let rp = Rp2040::with_clock(clock.clone());
+    rp.write_u32(WATCHDOG + 0x04, 1000);
+    rp.write_u32(WATCHDOG, 1 << 30);
+    clock.advance(100);
+    let counter = rp.read_u32(WATCHDOG) & 0x00ff_ffff;
+    assert!(counter < 1000);
+    rp.write_u32(WATCHDOG + 0x0c, 1);
+    rp.write_u32((WATCHDOG + 0x0c) | 0x2000, 2);
+    assert_eq!(rp.read_u32(WATCHDOG + 0x0c), 3);
 }

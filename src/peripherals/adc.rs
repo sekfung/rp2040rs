@@ -27,7 +27,7 @@ const CS_READY: u32 = 1 << 8;
 const CS_START_MANY: u32 = 1 << 3;
 const CS_START_ONE: u32 = 1 << 2;
 const CS_EN: u32 = 1 << 0;
-const CS_WRITE_MASK: u32 = 0x001f_7f0f;
+const CS_WRITE_MASK: u32 = 0x001f_700f;
 
 const FCS_THRES_MASK: u32 = 0xf;
 const FCS_THRESH_SHIFT: u32 = 24;
@@ -141,8 +141,11 @@ impl Adc {
 
 fn start_adc_read(state: &Rc<RefCell<AdcState>>, board: &Weak<RefCell<BoardShared>>) {
     let channel = ((state.borrow().cs >> CS_AINSEL_SHIFT) & CS_AINSEL_MASK) as usize;
-    let _ = channel;
-    state.borrow_mut().busy = true;
+    {
+        let mut state = state.borrow_mut();
+        state.current_channel = channel.min(4);
+        state.busy = true;
+    }
     let mut alarm = state.borrow().sample_alarm.clone();
     alarm.schedule(2_000.0);
     state.borrow_mut().sample_alarm = alarm;
@@ -265,7 +268,7 @@ impl Peripheral for Adc {
                     | if state.fifo.empty() { FCS_EMPTY } else { 0 }
             }
             DIV => state.clock_div,
-            INTR => state.fifo.item_count() as u32,
+            INTR => self.int_raw(),
             INTE => state.int_enable,
             INTF => state.int_force,
             INTS => (self.int_raw() & state.int_enable) | state.int_force,
@@ -274,11 +277,10 @@ impl Peripheral for Adc {
     }
 
     fn write_u32_atomic(&self, offset: u32, value: u32, atomic_type: u32) {
-        let current = self.read_u32(offset);
         let value = if atomic_type == 0 {
             value
         } else {
-            atomic_update(current, atomic_type, value)
+            atomic_update(self.read_u32(offset), atomic_type, value)
         };
         match offset {
             CS => {
