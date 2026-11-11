@@ -2,7 +2,7 @@ use std::cell::RefCell;
 use std::rc::Weak;
 
 use crate::cortex_m0_core::Core;
-use crate::peripherals::peripheral::{BasePeripheral, Peripheral};
+use crate::peripherals::peripheral::{atomic_update, BasePeripheral, Peripheral};
 use crate::rp2040::BoardShared;
 
 #[derive(Clone)]
@@ -34,7 +34,10 @@ impl Peripheral for SysCfg {
 
     fn write_u32_atomic(&self, offset: u32, value: u32, atomic_type: u32) {
         match offset {
-            0x00 => self.core.set_interrupt_nmi_mask(value),
+            0x00 => {
+                let value = atomic_update(self.core.interrupt_nmi_mask(), atomic_type, value);
+                self.core.set_interrupt_nmi_mask(value);
+            }
             _ => self.base.write_u32_atomic(offset, value, atomic_type),
         }
     }

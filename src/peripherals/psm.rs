@@ -1,7 +1,7 @@
 use std::cell::{Cell, RefCell};
 use std::rc::Weak;
 
-use crate::peripherals::peripheral::{BasePeripheral, Peripheral};
+use crate::peripherals::peripheral::{atomic_update, BasePeripheral, Peripheral};
 use crate::rp2040::BoardShared;
 
 const PSM_BITS_MASK: u32 = 0x0001_ffff;
@@ -44,9 +44,18 @@ impl Peripheral for Psm {
 
     fn write_u32_atomic(&self, offset: u32, value: u32, atomic_type: u32) {
         match offset {
-            0x00 => self.frce_on.set(value & PSM_BITS_MASK),
-            0x04 => self.frce_off.set(value & PSM_BITS_MASK),
-            0x08 => self.wdsel.set(value & PSM_BITS_MASK),
+            0x00 => {
+                let value = atomic_update(self.frce_on.get(), atomic_type, value);
+                self.frce_on.set(value & PSM_BITS_MASK);
+            }
+            0x04 => {
+                let value = atomic_update(self.frce_off.get(), atomic_type, value);
+                self.frce_off.set(value & PSM_BITS_MASK);
+            }
+            0x08 => {
+                let value = atomic_update(self.wdsel.get(), atomic_type, value);
+                self.wdsel.set(value & PSM_BITS_MASK);
+            }
             _ => self.base.write_u32_atomic(offset, value, atomic_type),
         }
     }

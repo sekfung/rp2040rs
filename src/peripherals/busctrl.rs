@@ -1,7 +1,7 @@
 use std::cell::{Cell, RefCell};
 use std::rc::Weak;
 
-use crate::peripherals::peripheral::{BasePeripheral, Peripheral};
+use crate::peripherals::peripheral::{atomic_update, BasePeripheral, Peripheral};
 use crate::rp2040::BoardShared;
 
 #[derive(Clone)]
@@ -41,7 +41,9 @@ impl Peripheral for BusCtrl {
                 self.perf_ctr[((offset - 0x008) >> 3) as usize].set(0);
             }
             0x00c | 0x014 | 0x01c | 0x024 => {
-                self.perf_sel[((offset - 0x00c) >> 3) as usize].set(value & 0x1f);
+                let index = ((offset - 0x00c) >> 3) as usize;
+                let value = atomic_update(self.perf_sel[index].get(), atomic_type, value);
+                self.perf_sel[index].set(value & 0x1f);
             }
             _ => self.base.write_u32_atomic(offset, value, atomic_type),
         }

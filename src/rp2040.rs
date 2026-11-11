@@ -458,7 +458,7 @@ impl Rp2040 {
             .iter()
             .enumerate()
             .fold(0, |acc, (index, pin)| {
-                if pin.raw_input_value() {
+                if pin.input_value() {
                     acc | (1 << index)
                 } else {
                     acc

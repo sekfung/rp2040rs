@@ -1,7 +1,7 @@
 use std::cell::{Cell, RefCell};
 use std::rc::Weak;
 
-use crate::peripherals::peripheral::{BasePeripheral, Peripheral};
+use crate::peripherals::peripheral::{atomic_update, BasePeripheral, Peripheral};
 use crate::rp2040::BoardShared;
 
 #[derive(Clone)]
@@ -39,8 +39,14 @@ impl Peripheral for Resets {
 
     fn write_u32_atomic(&self, offset: u32, value: u32, atomic_type: u32) {
         match offset {
-            0x0 => self.reset.set(value & 0x1ff_ffff),
-            0x4 => self.wdsel.set(value & 0x1ff_ffff),
+            0x0 => {
+                let value = atomic_update(self.reset.get(), atomic_type, value);
+                self.reset.set(value & 0x1ff_ffff);
+            }
+            0x4 => {
+                let value = atomic_update(self.wdsel.get(), atomic_type, value);
+                self.wdsel.set(value & 0x1ff_ffff);
+            }
             _ => self.base.write_u32_atomic(offset, value, atomic_type),
         }
     }

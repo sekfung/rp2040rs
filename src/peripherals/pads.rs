@@ -2,7 +2,7 @@ use std::cell::{Cell, RefCell};
 use std::rc::Weak;
 
 use crate::gpio_pin::GpioPin;
-use crate::peripherals::peripheral::{BasePeripheral, Peripheral};
+use crate::peripherals::peripheral::{atomic_update, BasePeripheral, Peripheral};
 use crate::rp2040::BoardShared;
 
 #[derive(Clone)]
@@ -51,12 +51,15 @@ impl Peripheral for Pads {
         if (self.first..=self.last).contains(&offset) {
             let index = ((offset - self.first) >> 2) as usize;
             if let Some(pin) = self.pins.get(index) {
-                pin.set_pad_value(value);
+                pin.set_pad_value(atomic_update(pin.pad_value(), atomic_type, value));
             }
             return;
         }
         match offset {
-            0 => self.voltage_select.set(value & 1),
+            0 => {
+                let value = atomic_update(self.voltage_select.get(), atomic_type, value);
+                self.voltage_select.set(value & 1);
+            }
             _ => self.base.write_u32_atomic(offset, value, atomic_type),
         }
     }

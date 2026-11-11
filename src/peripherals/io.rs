@@ -4,7 +4,7 @@ use std::rc::Weak;
 use crate::cortex_m0_core::Core;
 use crate::gpio_pin::GpioPin;
 use crate::irq::Irq;
-use crate::peripherals::peripheral::{BasePeripheral, Peripheral};
+use crate::peripherals::peripheral::{atomic_update, BasePeripheral, Peripheral};
 use crate::rp2040::BoardShared;
 
 const GPIO_CTRL_LAST: u32 = 0x0ec;
@@ -93,7 +93,7 @@ impl Peripheral for Io {
             let index = (offset >> 3) as usize;
             if offset & 0x4 != 0 {
                 if let Some(pin) = self.pins.get(index) {
-                    pin.set_ctrl(value);
+                    pin.set_ctrl(atomic_update(pin.ctrl(), atomic_type, value));
                 }
             }
             return;
@@ -101,11 +101,16 @@ impl Peripheral for Io {
         if (INTR0..=PROC0_INTS3).contains(&offset) {
             let start = ((offset & 0xf) * 2) as usize;
             let register = offset & !0xf;
+            let merged = if register == INTR0 {
+                value
+            } else {
+                atomic_update(self.read_u32(offset), atomic_type, value)
+            };
             for index in 0..8 {
                 let Some(pin) = self.pins.get(start + index) else {
                     continue;
                 };
-                let pin_value = (value >> (index * 4)) & 0xf;
+                let pin_value = (merged >> (index * 4)) & 0xf;
                 let raw_value = (self.raw_write_value.get() >> (index * 4)) & 0xf;
                 match register {
                     INTR0 => pin.update_irq_value(raw_value),

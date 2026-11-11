@@ -2,10 +2,6 @@ fn s32(value: u32) -> i32 {
     value as i32
 }
 
-fn u32(value: i32) -> u32 {
-    value as u32
-}
-
 #[derive(Clone, Copy, Default)]
 struct Config {
     shift: u32,
@@ -185,30 +181,23 @@ impl Interpolator {
         let clamp0 = if c0.signed { sclamp0 } else { uclamp0 };
 
         let alpha1 = result1 & 0xff;
-        let delta = if c1.signed {
-            s32(self.base1).wrapping_sub(s32(self.base0))
-        } else {
-            self.base1.wrapping_sub(self.base0) as i32
-        };
-        let blend_value =
-            s32(self.base0).wrapping_add((alpha1 as i64 * delta as i64).div_euclid(256) as i32);
         let blend1 = if c1.signed {
-            u32(blend_value)
+            let base0 = s32(self.base0) as i64;
+            let base1 = s32(self.base1) as i64;
+            base0.wrapping_add((alpha1 as i64 * (base1 - base0)).div_euclid(256)) as u32
         } else {
-            self.base0.wrapping_add(
-                (alpha1 as u64 * self.base1.wrapping_sub(self.base0) as u64 / 256) as u32,
-            )
+            let base0 = self.base0 as i64;
+            let base1 = self.base1 as i64;
+            base0.wrapping_add((alpha1 as i64 * (base1 - base0)).div_euclid(256)) as u32
         };
 
         self.smresult0 = result0;
         self.smresult1 = result1;
         self.result0 = if do_blend {
             alpha1
-        } else if do_clamp {
-            clamp0
         } else {
-            addresult0
-        } | (c0.force_msb << 28);
+            (if do_clamp { clamp0 } else { addresult0 }) | (c0.force_msb << 28)
+        };
         self.result1 = if do_blend { blend1 } else { addresult1 } | (c0.force_msb << 28);
         self.result2 = addresult2;
 

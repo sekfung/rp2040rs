@@ -92,6 +92,7 @@ fn autopush_stall_does_not_reuse_stale_shift_data() {
     let rp = Rp2040::new();
     for pin in 0..8 {
         rp.gpio[pin].set_input_value(true);
+        rp.write_u32(0x4001_c004 + (pin as u32) * 4, 0b1110110);
     }
     assert_eq!(rp.gpio_values() & 0xff, 0xff);
 

@@ -72,3 +72,52 @@ fn sio_interpolator_registers_are_wired() {
     rp.write_u32(SIO + 0x088, 5); // BASE0
     assert_eq!(rp.read_u32(SIO + 0x0a0), 15); // PEEK_LANE0 = base0 + result0
 }
+
+#[test]
+fn new_peripherals_honor_atomic_aliases() {
+    let rp = Rp2040::new();
+
+    rp.write_u32(PSM, 1);
+    rp.write_u32(PSM | 0x2000, 4);
+    assert_eq!(rp.read_u32(PSM), 5);
+
+    rp.write_u32(RESETS, 1);
+    rp.write_u32(RESETS | 0x2000, 2);
+    assert_eq!(rp.read_u32(RESETS), 3);
+
+    rp.write_u32(PADS_BANK0 + 4, 0b0110110);
+    rp.write_u32((PADS_BANK0 + 4) | 0x2000, 1);
+    assert_eq!(rp.read_u32(PADS_BANK0 + 4), 0b0110111);
+
+    rp.write_u32(IO_BANK0 + 4, 0x1f);
+    rp.write_u32((IO_BANK0 + 4) | 0x2000, 0x20);
+    assert_eq!(rp.read_u32(IO_BANK0 + 4), 0x3f);
+
+    rp.write_u32(SYSCFG, 1);
+    rp.write_u32(SYSCFG | 0x2000, 2);
+    assert_eq!(rp.read_u32(SYSCFG), 3);
+
+    rp.write_u32(IO_BANK0 + 0x100, 1);
+    rp.write_u32((IO_BANK0 + 0x100) | 0x2000, 2);
+    assert_eq!(rp.read_u32(IO_BANK0 + 0x100) & 0xf, 3);
+}
+
+#[test]
+fn interpolator_blend_uses_signed_js_difference() {
+    let rp = Rp2040::new();
+    rp.write_u32(SIO + 0x0b0, 7 << 10); // INTERP0_CTRL_LANE1
+    rp.write_u32(SIO + 0x0ac, (7 << 10) | (1 << 21)); // mask 8 bits, blend
+    rp.write_u32(SIO + 0x088, 100); // BASE0
+    rp.write_u32(SIO + 0x08c, 0); // BASE1
+    rp.write_u32(SIO + 0x084, 128); // ACCUM1 -> alpha 128
+    assert_eq!(rp.read_u32(SIO + 0x0a4), 50); // PEEK_LANE1
+}
+
+#[test]
+fn gpio_values_respect_pad_input_enable() {
+    let rp = Rp2040::new();
+    rp.gpio[0].set_input_value(true);
+    assert_eq!(rp.gpio_values() & 1, 0);
+    rp.write_u32(PADS_BANK0 + 4, 0b1110110);
+    assert_eq!(rp.gpio_values() & 1, 1);
+}
