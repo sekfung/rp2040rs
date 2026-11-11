@@ -22,10 +22,15 @@ fn reads_and_writes_registers_and_memory() {
     rp2040.core.set_xpsr(0x0100_0000);
 
     assert_eq!(gdb.process_message("p0").unwrap(), "78563412");
+    assert_eq!(gdb.process_message("g").unwrap().len(), 160);
     assert_eq!(
         gdb.process_message("p10").unwrap(),
         encode_hex_u32_le(0x0100_0000)
     );
+
+    assert_eq!(gdb.process_message("p13").unwrap(), "00");
+    assert_eq!(gdb.process_message("P13=01").unwrap(), "OK");
+    assert_eq!(gdb.process_message("p13").unwrap(), "01");
 
     assert_eq!(gdb.process_message("P0=efbeadde").unwrap(), "OK");
     assert_eq!(rp2040.core.reg(0), 0xdead_beef);
@@ -49,6 +54,12 @@ fn steps_continues_and_reports_break() {
     assert!(gdb.process_message("c").unwrap().starts_with("S05"));
     assert_eq!(rp2040.core.pc(), 0x2000_0000);
     assert!(!gdb.target.executing());
+
+    rp2040.write_u16(0x2000_0000, 0xbf00); // NOP
+    rp2040.core.set_pc(0x2000_0000);
+    let plain_step = gdb.process_message("s").unwrap();
+    assert!(plain_step.starts_with("T05"));
+    assert_eq!(rp2040.core.pc(), 0x2000_0002);
 }
 
 #[test]
@@ -69,9 +80,14 @@ fn query_commands_return_expected_packets() {
         "PacketSize=4000;vContSupported+;qXfer:features:read+"
     );
     assert!(gdb
-        .process_message("qXfer:features:read:target.xml:0,1")
+        .process_message("qXfer:features:read:target.xml:0,ffff")
         .unwrap()
         .starts_with('l'));
+    let chunk = gdb
+        .process_message("qXfer:features:read:target.xml:0,10")
+        .unwrap();
+    assert!(chunk.starts_with('m'));
+    assert_eq!(chunk.len(), 17);
     assert!(gdb
         .process_message("qRegisterInfo0")
         .unwrap()
@@ -81,7 +97,7 @@ fn query_commands_return_expected_packets() {
         .unwrap()
         .contains("name:msp"));
     assert!(gdb
-        .process_message("qXfer:features:read:target.xml:0,1")
+        .process_message("qXfer:features:read:target.xml:0,ffff")
         .unwrap()
         .contains("org.gnu.gdb.arm.m-system"));
     assert_eq!(gdb.process_message("qRegisterInfo99").unwrap(), "E45");

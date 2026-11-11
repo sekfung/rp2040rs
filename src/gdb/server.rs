@@ -25,10 +25,10 @@ const REGISTER_INFO: [&str; 23] = [
     "name:cpsr;bitsize:32;offset:64;encoding:int;format:hex;set:General Purpose Registers;",
     "name:msp;bitsize:32;offset:68;encoding:int;format:hex;set:System Registers;",
     "name:psp;bitsize:32;offset:72;encoding:int;format:hex;set:System Registers;",
-    "name:primask;bitsize:8;offset:76;encoding:int;format:hex;set:System Registers;",
+    "name:primask;bitsize:1;offset:76;encoding:int;format:hex;set:System Registers;",
     "name:basepri;bitsize:8;offset:77;encoding:int;format:hex;set:System Registers;",
-    "name:faultmask;bitsize:8;offset:78;encoding:int;format:hex;set:System Registers;",
-    "name:control;bitsize:8;offset:79;encoding:int;format:hex;set:System Registers;",
+    "name:faultmask;bitsize:1;offset:78;encoding:int;format:hex;set:System Registers;",
+    "name:control;bitsize:2;offset:79;encoding:int;format:hex;set:System Registers;",
 ];
 
 const TARGET_XML: &str = "<?xml version=\"1.0\"?><!DOCTYPE target SYSTEM \"gdb-target.dtd\"><target version=\"1.0\"><architecture>arm</architecture><feature name=\"org.gnu.gdb.arm.m-profile\"><reg name=\"r0\" bitsize=\"32\" regnum=\"0\"/><reg name=\"r1\" bitsize=\"32\" regnum=\"1\"/><reg name=\"r2\" bitsize=\"32\" regnum=\"2\"/><reg name=\"r3\" bitsize=\"32\" regnum=\"3\"/><reg name=\"r4\" bitsize=\"32\" regnum=\"4\"/><reg name=\"r5\" bitsize=\"32\" regnum=\"5\"/><reg name=\"r6\" bitsize=\"32\" regnum=\"6\"/><reg name=\"r7\" bitsize=\"32\" regnum=\"7\"/><reg name=\"r8\" bitsize=\"32\" regnum=\"8\"/><reg name=\"r9\" bitsize=\"32\" regnum=\"9\"/><reg name=\"r10\" bitsize=\"32\" regnum=\"10\"/><reg name=\"r11\" bitsize=\"32\" regnum=\"11\"/><reg name=\"r12\" bitsize=\"32\" regnum=\"12\"/><reg name=\"sp\" bitsize=\"32\" regnum=\"13\"/><reg name=\"lr\" bitsize=\"32\" regnum=\"14\"/><reg name=\"pc\" bitsize=\"32\" regnum=\"15\"/><reg name=\"xPSR\" bitsize=\"32\" regnum=\"16\"/></feature><feature name=\"org.gnu.gdb.arm.m-system\"><reg name=\"msp\" bitsize=\"32\" regnum=\"17\"/><reg name=\"psp\" bitsize=\"32\" regnum=\"18\"/><reg name=\"primask\" bitsize=\"8\" regnum=\"19\"/><reg name=\"basepri\" bitsize=\"8\" regnum=\"20\"/><reg name=\"faultmask\" bitsize=\"8\" regnum=\"21\"/><reg name=\"control\" bitsize=\"8\" regnum=\"22\"/></feature></target>";
@@ -57,8 +57,14 @@ impl GdbServer {
                 if cmd == "qAttached" {
                     return Some("1".into());
                 }
-                if cmd.starts_with("qXfer:features:read:target.xml") {
-                    return Some(format!("l{TARGET_XML}"));
+                if let Some(range) = cmd.strip_prefix("qXfer:features:read:target.xml:") {
+                    let (offset, length) = range.split_once(',').unwrap_or(("0", "ffff"));
+                    let offset = usize::from_str_radix(offset, 16).unwrap_or(0);
+                    let length = usize::from_str_radix(length, 16).unwrap_or(TARGET_XML.len());
+                    let start = offset.min(TARGET_XML.len());
+                    let end = start.saturating_add(length).min(TARGET_XML.len());
+                    let prefix = if end < TARGET_XML.len() { 'm' } else { 'l' };
+                    return Some(format!("{prefix}{}", &TARGET_XML[start..end]));
                 }
                 if cmd.starts_with("qRegisterInfo") {
                     let index = usize::from_str_radix(cmd.get(13..).unwrap_or(""), 16).ok();
@@ -79,11 +85,11 @@ impl GdbServer {
                 if cmd == "vCont?" {
                     return Some("vCont;c;C;s;S".into());
                 }
-                if cmd.starts_with("vCont;c") {
+                if cmd.starts_with("vCont;c") || cmd.starts_with("vCont;C") {
                     self.continue_target();
                     return Some(STOP_REPLY_TRAP.into());
                 }
-                if cmd.starts_with("vCont;s") {
+                if cmd.starts_with("vCont;s") || cmd.starts_with("vCont;S") {
                     rp2040.step();
                     return Some(self.step_reply());
                 }
@@ -93,12 +99,22 @@ impl GdbServer {
                 self.continue_target();
                 Some(STOP_REPLY_TRAP.into())
             }
+            's' => {
+                rp2040.step();
+                Some(self.step_reply())
+            }
             'g' => {
-                let mut bytes = Vec::with_capacity(17 * 4);
+                let mut bytes = Vec::with_capacity(80);
                 for i in 0..16 {
                     bytes.extend_from_slice(&core.reg(i).to_le_bytes());
                 }
                 bytes.extend_from_slice(&core.xpsr().to_le_bytes());
+                bytes.extend_from_slice(&core.msp().to_le_bytes());
+                bytes.extend_from_slice(&core.psp().to_le_bytes());
+                bytes.push(u8::from(core.pm()));
+                bytes.push(0); // basepri
+                bytes.push(0); // faultmask
+                bytes.push(core.read_special_register(SYSM_CONTROL) as u8);
                 Some(encode_hex_buf(&bytes))
             }
             'p' => {
@@ -108,9 +124,13 @@ impl GdbServer {
                     0x10 => core.xpsr(),
                     0x11 => core.msp(),
                     0x12 => core.psp(),
-                    0x13 => u32::from(core.pm()),
-                    0x14 | 0x15 => 0,
-                    0x16 => core.read_special_register(SYSM_CONTROL),
+                    0x13 => return Some(encode_hex_buf(&[u8::from(core.pm())])),
+                    0x14 | 0x15 => return Some(encode_hex_buf(&[0])),
+                    0x16 => {
+                        return Some(encode_hex_buf(&[
+                            core.read_special_register(SYSM_CONTROL) as u8
+                        ]))
+                    }
                     _ => return Some(String::new()),
                 };
                 Some(encode_hex_u32_le(value))
@@ -119,7 +139,7 @@ impl GdbServer {
                 let (index, value) = cmd.get(1..)?.split_once('=')?;
                 let index = usize::from_str_radix(index, 16).ok()?;
                 let decoded = decode_hex_buf(value.trim());
-                let expected_bytes = if index > 0x12 { 1 } else { 4 };
+                let expected_bytes = if (0x13..=0x16).contains(&index) { 1 } else { 4 };
                 if decoded.len() != expected_bytes {
                     return Some("E00".into());
                 }
