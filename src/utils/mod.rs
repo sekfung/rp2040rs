@@ -2,6 +2,7 @@ pub mod assembler;
 pub mod bit;
 pub mod fifo;
 pub mod logging;
+pub mod pio_assembler;
 pub mod time;
 
 pub use bit::{bit, s32, u32};
