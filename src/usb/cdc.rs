@@ -125,7 +125,7 @@ impl UsbCdc {
             let weak = weak.clone();
             move |endpoint, size| {
                 if let Some(state) = weak.upgrade() {
-                    let (buffer, out_endpoint) = {
+                    let buffer = {
                         let mut state = state.borrow_mut();
                         let out_endpoint = state.out_endpoint;
                         if endpoint as i32 != out_endpoint {
@@ -136,9 +136,8 @@ impl UsbCdc {
                         for _ in 0..count {
                             buffer.push(state.tx_fifo.pull() as u8);
                         }
-                        (buffer, out_endpoint)
+                        buffer
                     };
-                    let _ = out_endpoint;
                     state.borrow().usb.endpoint_read_done(endpoint, &buffer, 10);
                 }
             }

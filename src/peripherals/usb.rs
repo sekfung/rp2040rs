@@ -10,6 +10,7 @@ use crate::rp2040::BoardShared;
 const ENDPOINT_COUNT: usize = 16;
 const EP1_IN_CONTROL: u32 = 0x8;
 const EP0_IN_BUFFER_CONTROL: u32 = 0x80;
+const EP0_OUT_BUFFER_CONTROL: u32 = 0x84;
 const EP15_OUT_BUFFER_CONTROL: u32 = 0xfc;
 const ADDR_ENDP: u32 = 0x0;
 const ADDR_ENDP1: u32 = 0x04;
@@ -72,6 +73,7 @@ struct UsbState {
     int_force: u32,
     sie_ctrl: u32,
     sie_status: u32,
+    sof_frame: u32,
     buff_status: u32,
     int_ep_ctrl: u32,
     int_ep_addr: [u32; 15],
@@ -115,6 +117,7 @@ impl UsbController {
             int_force: 0,
             sie_ctrl: 0,
             sie_status: 0,
+            sof_frame: 0,
             buff_status: 0,
             int_ep_ctrl: 0,
             int_ep_addr: [0; 15],
@@ -237,26 +240,44 @@ impl UsbController {
                 control & USB_CTRL_INTERRUPT_PER_TRANSFER != 0,
             )
         };
-        let buffer1 = (value >> USB_BUF1_SHIFT) & USB_BUF_CTRL_LEN_MASK;
-        if double && (value >> USB_BUF1_SHIFT) & USB_BUF_CTRL_AVAILABLE != 0 {
-            self.start_transfer(endpoint, buffer_out, buffer1);
+        let buffer1_available = (value >> USB_BUF1_SHIFT) & USB_BUF_CTRL_AVAILABLE != 0;
+        if double && buffer1_available {
+            let buffer1 = (value >> USB_BUF1_SHIFT) & USB_BUF_CTRL_LEN_MASK;
+            let buffer_offset = self.endpoint_buffer_offset(endpoint, buffer_out) + 64;
+            let mut cleared = value & !(USB_BUF_CTRL_AVAILABLE << USB_BUF1_SHIFT);
+            self.write_dpram(offset, &cleared.to_le_bytes());
+            if buffer_out {
+                self.call_endpoint_read(endpoint, buffer1 as usize);
+            } else {
+                cleared &= !(USB_BUF_CTRL_FULL << USB_BUF1_SHIFT);
+                self.write_dpram(offset, &cleared.to_le_bytes());
+                let buffer = self.read_dpram(buffer_offset, buffer1 as usize);
+                self.indicate_buffer_ready(endpoint, false);
+                self.schedule_write(endpoint, buffer);
+            }
         }
-        let _ = interrupt;
-        self.start_transfer(endpoint, buffer_out, length);
-    }
-
-    fn start_transfer(&self, endpoint: u32, buffer_out: bool, length: u32) {
-        let offset = self.endpoint_buffer_offset(endpoint, buffer_out);
-        let buffer = self.read_dpram(offset, length as usize);
+        let buffer_offset = self.endpoint_buffer_offset(endpoint, buffer_out);
+        let mut cleared = value & !USB_BUF_CTRL_AVAILABLE;
+        self.write_dpram(offset, &cleared.to_le_bytes());
         if buffer_out {
             self.call_endpoint_read(endpoint, length as usize);
         } else {
-            self.state.borrow_mut().write_buffers[endpoint as usize].push_back(buffer);
-            let mut state = self.state.borrow_mut();
-            let mut alarm = state.write_alarms[endpoint as usize].clone();
-            alarm.schedule(state.write_delay_micros as f64 * 1000.0);
-            state.write_alarms[endpoint as usize] = alarm;
+            cleared &= !USB_BUF_CTRL_FULL;
+            self.write_dpram(offset, &cleared.to_le_bytes());
+            let buffer = self.read_dpram(buffer_offset, length as usize);
+            if interrupt || !double {
+                self.indicate_buffer_ready(endpoint, false);
+            }
+            self.schedule_write(endpoint, buffer);
         }
+    }
+
+    fn schedule_write(&self, endpoint: u32, buffer: Vec<u8>) {
+        let mut state = self.state.borrow_mut();
+        state.write_buffers[endpoint as usize].push_back(buffer);
+        let mut alarm = state.write_alarms[endpoint as usize].clone();
+        alarm.schedule(state.write_delay_micros as f64 * 1000.0);
+        state.write_alarms[endpoint as usize] = alarm;
     }
 
     fn call_endpoint_read(&self, endpoint: u32, length: usize) {
@@ -270,6 +291,11 @@ impl UsbController {
     fn read_endpoint_control(&self, endpoint: u32, out: bool) -> u32 {
         let offset = EP1_IN_CONTROL + 8 * (endpoint - 1) + if out { 4 } else { 0 };
         self.dpram_word(offset)
+    }
+
+    fn is_dpram_register(offset: u32) -> bool {
+        (EP1_IN_CONTROL..=ADDR_ENDP15).contains(&offset)
+            || (EP0_IN_BUFFER_CONTROL..=EP15_OUT_BUFFER_CONTROL).contains(&offset)
     }
 
     fn endpoint_buffer_offset(&self, endpoint: u32, out: bool) -> u32 {
@@ -376,7 +402,7 @@ fn finish_read(state: &Rc<RefCell<UsbState>>, board: &Weak<RefCell<BoardShared>>
         if let Some(usb) = board.borrow().usb_ctrl.clone() {
             let out = true;
             let offset = usb.endpoint_buffer_offset(endpoint as u32, out);
-            let control_reg = EP0_IN_BUFFER_CONTROL + endpoint as u32 * 8;
+            let control_reg = EP0_OUT_BUFFER_CONTROL + endpoint as u32 * 8;
             let mut control = usb.dpram_word(control_reg);
             let requested = control & USB_BUF_CTRL_LEN_MASK;
             let length = buffer.len().min(requested as usize) as u32;
@@ -412,7 +438,7 @@ fn flush_endpoint_write(
             }
             state.borrow_mut().on_endpoint_write = Some(callback);
         }
-        let _ = board;
+        drop(board);
     }
 }
 
@@ -434,15 +460,15 @@ impl Peripheral for UsbController {
         if (ADDR_ENDP1..=ADDR_ENDP15).contains(&offset) && offset & 3 == 0 {
             return self.state.borrow().int_ep_addr[((offset - ADDR_ENDP1) >> 2) as usize];
         }
-        if (EP1_IN_CONTROL..=EP15_OUT_BUFFER_CONTROL).contains(&offset) {
+        if Self::is_dpram_register(offset) {
             return self.dpram_word(offset);
         }
         let state = self.state.borrow();
         match offset {
-            ADDR_ENDP => state.addr_endp,
+            ADDR_ENDP => state.addr_endp & 0x7807f,
             MAIN_CTRL => state.main_ctrl,
             SOF_WR => 0,
-            SOF_RD => 0,
+            SOF_RD => state.sof_frame & 0x7ff,
             SIE_CTRL => state.sie_ctrl,
             SIE_STATUS => state.sie_status,
             INT_EP_CTRL => state.int_ep_ctrl,
@@ -467,7 +493,7 @@ impl Peripheral for UsbController {
             self.state.borrow_mut().int_ep_addr[((offset - ADDR_ENDP1) >> 2) as usize] = value;
             return;
         }
-        if (EP1_IN_CONTROL..=EP15_OUT_BUFFER_CONTROL).contains(&offset) {
+        if Self::is_dpram_register(offset) {
             self.write_dpram(offset, &value.to_le_bytes());
             if offset >= EP0_IN_BUFFER_CONTROL {
                 self.dpram_updated(offset, value);
@@ -560,7 +586,7 @@ impl Peripheral for UsbController {
                 };
                 self.check_interrupts();
             }
-            SOF_WR => {}
+            SOF_WR => self.state.borrow_mut().sof_frame = value & 0x7ff,
             _ => {}
         }
     }
