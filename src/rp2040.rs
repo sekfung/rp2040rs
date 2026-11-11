@@ -5,9 +5,11 @@ use std::rc::Rc;
 use crate::clock::{Clock, SimulationClock};
 use crate::cortex_m0_core::Core;
 use crate::gpio_pin::GpioPin;
+use crate::peripherals::adc::Adc;
 use crate::peripherals::busctrl::BusCtrl;
 use crate::peripherals::clocks::Clocks;
 use crate::peripherals::dma::Dma;
+use crate::peripherals::i2c::I2c;
 use crate::peripherals::io::Io;
 use crate::peripherals::pads::Pads;
 use crate::peripherals::pio::Pio;
@@ -16,12 +18,16 @@ use crate::peripherals::ppb::Ppb;
 use crate::peripherals::psm::Psm;
 use crate::peripherals::pwm::Pwm;
 use crate::peripherals::reset::Resets;
+use crate::peripherals::rtc::Rtc;
+use crate::peripherals::spi::Spi;
+use crate::peripherals::ssi::Ssi;
 use crate::peripherals::syscfg::SysCfg;
 use crate::peripherals::sysinfo::SysInfo;
 use crate::peripherals::tbman::Tbman;
 use crate::peripherals::timer::Timer;
 use crate::peripherals::uart::Uart;
 use crate::peripherals::usb::UsbController;
+use crate::peripherals::watchdog::Watchdog;
 use crate::peripherals::xosc::Xosc;
 use crate::peripherals::{BasePeripheral, Peripheral};
 use crate::sio::Sio;
@@ -149,6 +155,12 @@ pub struct BoardShared {
     pub dma: Option<Dma>,
     pub pio: [Option<Pio>; 2],
     pub usb_ctrl: Option<UsbController>,
+    pub adc: Option<Adc>,
+    pub i2c: [Option<I2c>; 2],
+    pub spi: [Option<Spi>; 2],
+    pub ssi: Option<Ssi>,
+    pub watchdog: Option<Watchdog>,
+    pub rtc: Option<Rtc>,
     pub sysinfo: Option<SysInfo>,
     pub syscfg: Option<SysCfg>,
     pub busctrl: Option<BusCtrl>,
@@ -183,6 +195,12 @@ pub struct Rp2040 {
     pub dma: Dma,
     pub pio: [Pio; 2],
     pub usb_ctrl: UsbController,
+    pub adc: Adc,
+    pub i2c: [I2c; 2],
+    pub spi: [Spi; 2],
+    pub ssi: Ssi,
+    pub watchdog: Watchdog,
+    pub rtc: Rtc,
     pub sysinfo: SysInfo,
     pub syscfg: SysCfg,
     pub busctrl: BusCtrl,
@@ -240,6 +258,12 @@ impl Rp2040 {
                 dma: None,
                 pio: [None, None],
                 usb_ctrl: None,
+                adc: None,
+                i2c: [None, None],
+                spi: [None, None],
+                ssi: None,
+                watchdog: None,
+                rtc: None,
                 sysinfo: None,
                 syscfg: None,
                 busctrl: None,
@@ -271,6 +295,18 @@ impl Rp2040 {
         let pio0 = Pio::new("PIO0", crate::irq::Irq::Pio0Irq0 as u32, 0, weak.clone());
         let pio1 = Pio::new("PIO1", crate::irq::Irq::Pio1Irq0 as u32, 1, weak.clone());
         let usb_ctrl = UsbController::new("USB", weak.clone());
+        let adc = Adc::new("ADC", weak.clone());
+        let i2c = [
+            I2c::new("I2C0", crate::irq::Irq::I2c0, weak.clone()),
+            I2c::new("I2C1", crate::irq::Irq::I2c1, weak.clone()),
+        ];
+        let spi = [
+            Spi::new("SPI0", crate::irq::Irq::Spi0, weak.clone()),
+            Spi::new("SPI1", crate::irq::Irq::Spi1, weak.clone()),
+        ];
+        let ssi = Ssi::new("SSI", weak.clone());
+        let watchdog = Watchdog::new("WATCHDOG_BASE", weak.clone());
+        let rtc = Rtc::new("RTC_BASE", weak.clone());
         let sysinfo = SysInfo::new("SYSINFO_BASE", weak.clone());
         let syscfg = SysCfg::new("SYSCFG", core.clone(), weak.clone());
         let busctrl = BusCtrl::new("BUSCTRL_BASE", weak.clone());
@@ -294,6 +330,12 @@ impl Rp2040 {
             board.dma = Some(dma.clone());
             board.pio = [Some(pio0.clone()), Some(pio1.clone())];
             board.usb_ctrl = Some(usb_ctrl.clone());
+            board.adc = Some(adc.clone());
+            board.i2c = [Some(i2c[0].clone()), Some(i2c[1].clone())];
+            board.spi = [Some(spi[0].clone()), Some(spi[1].clone())];
+            board.ssi = Some(ssi.clone());
+            board.watchdog = Some(watchdog.clone());
+            board.rtc = Some(rtc.clone());
             board.sysinfo = Some(sysinfo.clone());
             board.syscfg = Some(syscfg.clone());
             board.busctrl = Some(busctrl.clone());
@@ -325,6 +367,12 @@ impl Rp2040 {
             dma,
             pio,
             usb_ctrl,
+            adc,
+            i2c,
+            spi,
+            ssi,
+            watchdog,
+            rtc,
             sysinfo,
             syscfg,
             busctrl,
@@ -403,6 +451,14 @@ impl Rp2040 {
             (0x40030, Rc::new(self.busctrl.clone())),
             (0x4006c, Rc::new(self.tbman.clone())),
             (0x40054, Rc::new(self.timer.clone())),
+            (0x18000, Rc::new(self.ssi.clone())),
+            (0x4003c, Rc::new(self.spi[0].clone())),
+            (0x40040, Rc::new(self.spi[1].clone())),
+            (0x40044, Rc::new(self.i2c[0].clone())),
+            (0x40048, Rc::new(self.i2c[1].clone())),
+            (0x4004c, Rc::new(self.adc.clone())),
+            (0x40058, Rc::new(self.watchdog.clone())),
+            (0x4005c, Rc::new(self.rtc.clone())),
             (0x50110, Rc::new(self.usb_ctrl.clone())),
             (0x50200, Rc::new(self.pio[0].clone())),
             (0x50300, Rc::new(self.pio[1].clone())),

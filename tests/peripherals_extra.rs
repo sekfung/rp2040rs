@@ -1,4 +1,8 @@
 use rp2040rs::rp2040::Rp2040;
+use std::cell::Cell;
+use std::rc::Rc;
+
+use rp2040rs::clock::MockClock;
 
 const SYSINFO: u32 = 0x4000_0000;
 const SYSCFG: u32 = 0x4000_4000;
@@ -120,4 +124,81 @@ fn gpio_values_respect_pad_input_enable() {
     assert_eq!(rp.gpio_values() & 1, 0);
     rp.write_u32(PADS_BANK0 + 4, 0b1110110);
     assert_eq!(rp.gpio_values() & 1, 1);
+}
+
+const ADC: u32 = 0x4004_c000;
+const SPI0: u32 = 0x4003_c000;
+const I2C0: u32 = 0x4004_4000;
+const SSI: u32 = 0x1800_0000;
+const RTC: u32 = 0x4005_c000;
+const WATCHDOG: u32 = 0x4005_8000;
+
+#[test]
+fn adc_conversion_reaches_result_and_fifo() {
+    let clock = Rc::new(MockClock::new());
+    let rp = Rp2040::with_clock(clock.clone());
+    rp.adc.set_channel_value(0, 0x123);
+    rp.write_u32(ADC + 0x08, 1); // FCS.EN
+    rp.write_u32(ADC, 1 | (1 << 2)); // CS.EN | START_ONE
+    clock.advance(3);
+    assert_eq!(rp.read_u32(ADC + 0x04), 0x123);
+    assert_eq!(rp.read_u32(ADC + 0x0c) & 0xfff, 0x123);
+}
+
+#[test]
+fn spi_fifo_status_and_identifiers() {
+    let rp = Rp2040::new();
+    rp.write_u32(SPI0, 7); // SSPCR0 DSS=7 (8 bits)
+    rp.write_u32(SPI0 + 0x04, 2); // SSE
+    assert_eq!(rp.read_u32(SPI0 + 0x0c) & 1, 1); // TFE
+    rp.write_u32(SPI0 + 0x08, 0x5a);
+    assert_eq!(rp.read_u32(SPI0 + 0x08), 0); // default response
+    assert_eq!(rp.read_u32(SPI0 + 0xfe0), 0x22);
+}
+
+#[test]
+fn ssi_identity_and_data_register() {
+    let rp = Rp2040::new();
+    assert_eq!(rp.read_u32(SSI + 0x58), 0x5153_5049);
+    assert_eq!(rp.read_u32(SSI + 0x5c), 0x3430_312a);
+    rp.write_u32(SSI + 0x60, 5);
+    assert_eq!(rp.read_u32(SSI + 0x60), 0);
+}
+
+#[test]
+fn i2c_target_enable_and_status() {
+    let rp = Rp2040::new();
+    rp.write_u32(I2C0 + 0x04, 0x42);
+    assert_eq!(rp.read_u32(I2C0 + 0x04), 0x42);
+    rp.write_u32(I2C0 + 0x6c, 1);
+    assert_eq!(rp.read_u32(I2C0 + 0x6c) & 1, 1);
+    assert_eq!(rp.read_u32(I2C0 + 0x9c) & 1, 1);
+    assert_eq!(rp.read_u32(I2C0 + 0xfc), 0x4457_0140);
+}
+
+#[test]
+fn rtc_load_and_read_produces_setup_date() {
+    let rp = Rp2040::new();
+    rp.write_u32(RTC + 0x04, (2024 << 12) | (5 << 8) | 17);
+    rp.write_u32(RTC + 0x08, (12 << 16) | (34 << 8) | 56);
+    rp.write_u32(RTC + 0x0c, 0x10 | 0x1); // LOAD | ENABLE
+    assert_eq!(rp.read_u32(RTC + 0x18), (2024 << 12) | (5 << 8) | 17);
+    assert_eq!(
+        rp.read_u32(RTC + 0x1c) & 0x00ff_ffff,
+        (12 << 16) | (34 << 8) | 56
+    );
+}
+
+#[test]
+fn watchdog_scratch_and_forced_trigger() {
+    let rp = Rp2040::new();
+    let fired = Rc::new(Cell::new(false));
+    let flag = fired.clone();
+    rp.watchdog
+        .set_on_watchdog_trigger(Box::new(move || flag.set(true)));
+    rp.write_u32(WATCHDOG + 0x0c, 0xdead_beef);
+    assert_eq!(rp.read_u32(WATCHDOG + 0x0c), 0xdead_beef);
+    rp.write_u32(WATCHDOG, 1 << 31); // TRIGGER
+    assert!(fired.get());
+    assert_eq!(rp.read_u32(WATCHDOG + 0x08) & 2, 2);
 }
