@@ -9,4 +9,7 @@ pub mod peripherals;
 pub mod rp2040;
 pub mod utils;
 
+#[cfg(test)]
+pub mod test_support;
+
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");

@@ -421,7 +421,110 @@ impl Core {
         self.set_pc(self.pc().wrapping_add(2));
         let mut delta_cycles = 1u32;
 
-        if opcode >> 11 == 0b00100 {
+        if opcode >> 6 == 0b0100000101 {
+            // ADCS Rdn, Rm
+            let rdn = (opcode & 0x7) as usize;
+            let rm = ((opcode >> 3) & 0x7) as usize;
+            let carry = u32::from(self.c());
+            let result = self.add_with_carry(self.reg(rdn), self.reg(rm), carry, true);
+            self.set_reg(rdn, result);
+        } else if opcode >> 11 == 0b10101 {
+            // ADD Rd, SP, #imm8
+            let rd = ((opcode >> 8) & 0x7) as usize;
+            let imm = (opcode & 0xff) << 2;
+            let result = self.sp().wrapping_add(u32::from(imm));
+            self.set_reg(rd, result);
+        } else if opcode >> 7 == 0b1_0110_0000 {
+            // ADD SP, #imm7
+            let imm = ((opcode & 0x7f) << 2) as u32;
+            self.set_sp(self.sp().wrapping_add(imm));
+        } else if opcode >> 9 == 0b0001110 {
+            // ADDS Rd, Rn, #imm3
+            let rd = (opcode & 0x7) as usize;
+            let rn = ((opcode >> 3) & 0x7) as usize;
+            let imm = ((opcode >> 6) & 0x7) as u32;
+            let result = self.add_with_carry(self.reg(rn), imm, 0, true);
+            self.set_reg(rd, result);
+        } else if opcode >> 11 == 0b00110 {
+            // ADDS Rdn, #imm8
+            let rdn = ((opcode >> 8) & 0x7) as usize;
+            let imm = (opcode & 0xff) as u32;
+            let result = self.add_with_carry(self.reg(rdn), imm, 0, true);
+            self.set_reg(rdn, result);
+        } else if opcode >> 9 == 0b0001100 {
+            // ADDS Rd, Rn, Rm
+            let rd = (opcode & 0x7) as usize;
+            let rn = ((opcode >> 3) & 0x7) as usize;
+            let rm = ((opcode >> 6) & 0x7) as usize;
+            let result = self.add_with_carry(self.reg(rn), self.reg(rm), 0, true);
+            self.set_reg(rd, result);
+        } else if opcode >> 8 == 0b01000100 {
+            // ADD (high registers), T2
+            let rdn = (((opcode >> 4) & 0x8) | (opcode & 0x7)) as usize;
+            let rm = ((opcode >> 3) & 0xf) as usize;
+            let rdn_value = if rdn == 15 {
+                opcode_pc.wrapping_add(4)
+            } else {
+                self.reg(rdn)
+            };
+            let rm_value = if rm == 15 {
+                opcode_pc.wrapping_add(4)
+            } else {
+                self.reg(rm)
+            };
+            let result = rdn_value.wrapping_add(rm_value);
+            if rdn == 15 {
+                self.set_pc(result & !1);
+                delta_cycles += 1;
+            } else if rdn == 13 {
+                self.set_sp(result);
+            } else {
+                self.set_reg(rdn, result);
+            }
+        } else if opcode >> 11 == 0b10100 {
+            // ADR Rd, #imm8
+            let rd = ((opcode >> 8) & 0x7) as usize;
+            let imm = (opcode & 0xff) << 2;
+            let base = opcode_pc.wrapping_add(4) & !3;
+            self.set_reg(rd, base.wrapping_add(u32::from(imm)));
+        } else if opcode >> 6 == 0b0100000000 {
+            // ANDS Rdn, Rm
+            let rdn = (opcode & 0x7) as usize;
+            let rm = ((opcode >> 3) & 0x7) as usize;
+            let result = self.reg(rdn) & self.reg(rm);
+            self.set_reg(rdn, result);
+            self.set_nz(result);
+        } else if opcode >> 11 == 0b00010 {
+            // ASRS Rd, Rm, #imm5
+            let rd = (opcode & 0x7) as usize;
+            let rm = ((opcode >> 3) & 0x7) as usize;
+            let imm5 = ((opcode >> 6) & 0x1f) as u32;
+            let shift = if imm5 == 0 { 32 } else { imm5 };
+            let (result, carry) = self.arithmetic_shift_right(self.reg(rm), shift);
+            self.set_reg(rd, result);
+            self.set_nz(result);
+            self.set_c(carry);
+        } else if opcode >> 6 == 0b0100000100 {
+            // ASRS Rdn, Rm (register)
+            let rdn = (opcode & 0x7) as usize;
+            let rm = ((opcode >> 3) & 0x7) as usize;
+            let shift = self.reg(rm) & 0xff;
+            if shift != 0 {
+                let (result, carry) = self.arithmetic_shift_right(self.reg(rdn), shift);
+                self.set_reg(rdn, result);
+                self.set_nz(result);
+                self.set_c(carry);
+            } else {
+                self.set_nz(self.reg(rdn));
+            }
+        } else if opcode >> 6 == 0b0100001110 {
+            // BICS Rdn, Rm
+            let rdn = (opcode & 0x7) as usize;
+            let rm = ((opcode >> 3) & 0x7) as usize;
+            let result = self.reg(rdn) & !self.reg(rm);
+            self.set_reg(rdn, result);
+            self.set_nz(result);
+        } else if opcode >> 11 == 0b00100 {
             // MOVS Rd, #imm8
             let value = u32::from(opcode & 0xff);
             let rd = ((opcode >> 8) & 0x7) as usize;
@@ -485,6 +588,46 @@ impl Core {
         }
         self.state.borrow_mut().cycles += u64::from(delta_cycles);
         delta_cycles
+    }
+
+    fn set_nz(&self, value: u32) {
+        self.set_n(value & 0x8000_0000 != 0);
+        self.set_z(value == 0);
+    }
+
+    fn add_with_carry(&self, a: u32, b: u32, carry: u32, set_flags: bool) -> u32 {
+        let sum = u64::from(a) + u64::from(b) + u64::from(carry);
+        let result = sum as u32;
+        if set_flags {
+            self.set_n(result & 0x8000_0000 != 0);
+            self.set_z(result == 0);
+            self.set_c(sum > u64::from(u32::MAX));
+            let overflow = (!(a ^ b) & (a ^ result) & 0x8000_0000) != 0;
+            self.set_v(overflow);
+        }
+        result
+    }
+
+    fn arithmetic_shift_right(&self, value: u32, shift: u32) -> (u32, bool) {
+        if shift == 0 {
+            return (value, self.c());
+        }
+        let shift = shift.min(32);
+        let carry = if shift >= 32 {
+            value & 0x8000_0000 != 0
+        } else {
+            value & (1 << (shift - 1)) != 0
+        };
+        let result = if shift >= 32 {
+            if value & 0x8000_0000 != 0 {
+                0xffff_ffff
+            } else {
+                0
+            }
+        } else {
+            ((value as i32) >> shift) as u32
+        };
+        (result, carry)
     }
 
     fn bx_write_pc(&self, address: u32) {
@@ -779,4 +922,339 @@ pub fn sign_extend_16(value: u32) -> u32 {
 
 pub fn exception_priority_constants() -> (u32, u32, u32) {
     (EXC_SVCALL, EXC_PENDSV, EXC_SYSTICK)
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::test_support::TestDriver;
+    use crate::utils::assembler::{
+        opcode_adcs, opcode_add_reg, opcode_add_sp2, opcode_add_sp_plus_imm, opcode_adds1,
+        opcode_adds2, opcode_adds_reg, opcode_adr, opcode_ands, opcode_asrs, opcode_asrs_reg,
+        opcode_bics, opcode_nop,
+    };
+
+    fn driver() -> TestDriver {
+        let driver = TestDriver::new();
+        driver.set_pc(0x2000_0000);
+        driver
+    }
+
+    #[test]
+    fn should_execute_adcs_r5_r4() {
+        let cpu = driver();
+        cpu.write_u16(0x2000_0000, opcode_adcs(5, 4));
+        cpu.set_registers(&[(4, 55), (5, 66)]);
+        cpu.set_flags(false, false, true, false);
+        cpu.single_step();
+        let r = cpu.read_registers();
+        assert_eq!(r.r5, 122);
+        assert!(!r.n && !r.z && !r.c && !r.v);
+    }
+
+    #[test]
+    fn should_execute_adcs_r5_r4_and_set_negative_overflow_flags() {
+        let cpu = driver();
+        cpu.write_u16(0x2000_0000, opcode_adcs(5, 4));
+        cpu.set_registers(&[(4, 0x7fff_ffff), (5, 0)]);
+        cpu.set_flags(false, false, true, false);
+        cpu.single_step();
+        let r = cpu.read_registers();
+        assert_eq!(r.r5, 0x8000_0000);
+        assert!(r.n && !r.z && !r.c && r.v);
+    }
+
+    #[test]
+    fn should_not_set_overflow_for_adcs_zero_plus_zero_with_carry() {
+        let cpu = driver();
+        cpu.write_u16(0x2000_0000, opcode_adcs(3, 2));
+        cpu.set_registers(&[(2, 0), (3, 0)]);
+        cpu.set_flags(false, true, true, false);
+        cpu.single_step();
+        let r = cpu.read_registers();
+        assert_eq!(r.r3, 1);
+        assert!(!r.n && !r.z && !r.c && !r.v);
+    }
+
+    #[test]
+    fn should_set_zero_carry_overflow_for_adcs_0x80000000_twice() {
+        let cpu = driver();
+        cpu.write_u16(0x2000_0000, opcode_adcs(0, 0));
+        cpu.set_registers(&[(0, 0x8000_0000)]);
+        cpu.set_flags(false, false, false, false);
+        cpu.single_step();
+        let r = cpu.read_registers();
+        assert_eq!(r.r0, 0);
+        assert!(!r.n && r.z && r.c && r.v);
+    }
+
+    #[test]
+    fn should_execute_add_sp_0x10() {
+        let cpu = driver();
+        cpu.set_registers(&[(13, 0x1000_0040)]);
+        cpu.write_u16(0x2000_0000, opcode_add_sp2(0x10));
+        cpu.single_step();
+        assert_eq!(cpu.read_registers().sp, 0x1000_0050);
+    }
+
+    #[test]
+    fn should_execute_add_r1_sp_4() {
+        let cpu = driver();
+        cpu.set_registers(&[(13, 0x54), (1, 0)]);
+        cpu.write_u16(0x2000_0000, opcode_add_sp_plus_imm(1, 0x10));
+        cpu.single_step();
+        let r = cpu.read_registers();
+        assert_eq!(r.sp, 0x54);
+        assert_eq!(r.r1, 0x64);
+    }
+
+    #[test]
+    fn should_execute_adds_r1_r2_3() {
+        let cpu = driver();
+        cpu.write_u16(0x2000_0000, opcode_adds1(1, 2, 3));
+        cpu.set_registers(&[(2, 2)]);
+        cpu.single_step();
+        let r = cpu.read_registers();
+        assert_eq!(r.r1, 5);
+        assert!(!r.n && !r.z && !r.c && !r.v);
+    }
+
+    #[test]
+    fn should_execute_adds_r1_1() {
+        let cpu = driver();
+        cpu.write_u16(0x2000_0000, opcode_adds2(1, 1));
+        cpu.set_registers(&[(1, 0xffff_ffff)]);
+        cpu.single_step();
+        let r = cpu.read_registers();
+        assert_eq!(r.r1, 0);
+        assert!(!r.n && r.z && r.c && !r.v);
+    }
+
+    #[test]
+    fn should_execute_adds_r1_r2_r7() {
+        let cpu = driver();
+        cpu.write_u16(0x2000_0000, opcode_adds_reg(1, 2, 7));
+        cpu.set_registers(&[(2, 2), (7, 27)]);
+        cpu.single_step();
+        let r = cpu.read_registers();
+        assert_eq!(r.r1, 29);
+        assert!(!r.n && !r.z && !r.c && !r.v);
+    }
+
+    #[test]
+    fn should_execute_adds_r4_r4_r2() {
+        let cpu = driver();
+        cpu.write_u16(0x2000_0000, opcode_adds_reg(4, 4, 2));
+        cpu.set_registers(&[(2, 0x74bc_8000), (4, 0x4374_0000)]);
+        cpu.single_step();
+        let r = cpu.read_registers();
+        assert_eq!(r.r4, 0xb830_8000);
+        assert!(r.n && !r.z && !r.c && r.v);
+    }
+
+    #[test]
+    fn should_execute_adds_r1_r1_r1() {
+        let cpu = driver();
+        cpu.write_u16(0x2000_0000, opcode_adds_reg(1, 1, 1));
+        cpu.set_registers(&[(1, 0xbf8d_1424)]);
+        cpu.set_flags(false, false, true, false);
+        cpu.single_step();
+        let r = cpu.read_registers();
+        assert_eq!(r.r1, 0x7f1a_2848);
+        assert!(!r.n && !r.z && r.c && r.v);
+    }
+
+    #[test]
+    fn should_execute_add_r1_ip() {
+        let cpu = driver();
+        cpu.write_u16(0x2000_0000, opcode_add_reg(1, 12));
+        cpu.set_registers(&[(1, 66), (12, 44)]);
+        cpu.single_step();
+        let r = cpu.read_registers();
+        assert_eq!(r.r1, 110);
+        assert!(!r.n && !r.z && !r.c && !r.v);
+    }
+
+    #[test]
+    fn should_not_update_flags_for_add_r3_r12_t2() {
+        let cpu = driver();
+        cpu.write_u16(0x2000_0000, opcode_add_reg(3, 12));
+        cpu.set_registers(&[(3, 0x0000_2000), (12, 0xffff_e000)]);
+        cpu.set_flags(true, true, true, true);
+        cpu.single_step();
+        let r = cpu.read_registers();
+        assert_eq!(r.r3, 0);
+        assert!(r.n && r.z && r.c && r.v);
+    }
+
+    #[test]
+    fn should_execute_add_sp_r8_and_not_update_flags() {
+        let cpu = driver();
+        cpu.write_u16(0x2000_0000, opcode_add_reg(13, 8));
+        cpu.set_registers(&[(13, 0x2003_0000), (8, 0x13)]);
+        cpu.set_flags(false, true, false, false);
+        cpu.single_step();
+        let r = cpu.read_registers();
+        assert_eq!(r.sp, 0x2003_0010);
+        assert!(r.z);
+    }
+
+    #[test]
+    fn should_execute_add_pc_r8() {
+        let cpu = driver();
+        cpu.write_u16(0x2000_0000, opcode_add_reg(15, 8));
+        cpu.set_registers(&[(8, 0x11)]);
+        cpu.single_step();
+        assert_eq!(cpu.read_registers().pc, 0x2000_0014);
+    }
+
+    #[test]
+    fn should_execute_add_r7_pc_word_aligned() {
+        let cpu = driver();
+        cpu.write_u16(0x2000_0000, opcode_add_reg(7, 15));
+        cpu.set_registers(&[(7, 0)]);
+        cpu.single_step();
+        assert_eq!(cpu.read_registers().r7, 0x2000_0004);
+    }
+
+    #[test]
+    fn should_execute_add_r7_pc_halfword_aligned() {
+        let cpu = driver();
+        cpu.write_u16(0x2000_0000, opcode_nop());
+        cpu.write_u16(0x2000_0002, opcode_add_reg(7, 15));
+        cpu.set_registers(&[(7, 0)]);
+        cpu.single_step();
+        cpu.single_step();
+        assert_eq!(cpu.read_registers().r7, 0x2000_0006);
+    }
+
+    #[test]
+    fn should_execute_adr_r4_0x50() {
+        let cpu = driver();
+        cpu.write_u16(0x2000_0000, opcode_adr(4, 0x50));
+        cpu.single_step();
+        assert_eq!(cpu.read_registers().r4, 0x2000_0054);
+    }
+
+    #[test]
+    fn should_execute_ands_r5_r0() {
+        let cpu = driver();
+        cpu.write_u16(0x2000_0000, opcode_ands(5, 0));
+        cpu.set_registers(&[(5, 0xffff_0000), (0, 0xf00f_ffff)]);
+        cpu.single_step();
+        let r = cpu.read_registers();
+        assert_eq!(r.r5, 0xf00f_0000);
+        assert!(r.n && !r.z);
+    }
+
+    #[test]
+    fn should_execute_asrs_r3_r2_31() {
+        let cpu = driver();
+        cpu.write_u16(0x2000_0000, opcode_asrs(3, 2, 31));
+        cpu.set_registers(&[(2, 0x8000_0000)]);
+        cpu.set_flags(false, false, true, false);
+        cpu.single_step();
+        let r = cpu.read_registers();
+        assert_eq!(r.r3, 0xffff_ffff);
+        assert_eq!(r.pc, 0x2000_0002);
+        assert!(r.n && !r.z && !r.c);
+    }
+
+    #[test]
+    fn should_update_carry_for_asrs_r3_r2_32() {
+        let cpu = driver();
+        cpu.write_u16(0x2000_0000, opcode_asrs(3, 2, 0));
+        cpu.set_registers(&[(2, 0x8000_0000)]);
+        cpu.set_flags(false, false, false, false);
+        cpu.single_step();
+        let r = cpu.read_registers();
+        assert_eq!(r.r3, 0xffff_ffff);
+        assert_eq!(r.pc, 0x2000_0002);
+        assert!(r.n && !r.z && r.c);
+    }
+
+    #[test]
+    fn should_execute_asrs_r3_r4_shift_7() {
+        let cpu = driver();
+        cpu.write_u16(0x2000_0000, opcode_asrs_reg(3, 4));
+        cpu.set_registers(&[(3, 0x8000_0040), (4, 0xff50_0007)]);
+        cpu.single_step();
+        let r = cpu.read_registers();
+        assert_eq!(r.r3, 0xff00_0000);
+        assert_eq!(r.pc, 0x2000_0002);
+        assert!(r.n && !r.z && r.c);
+    }
+
+    #[test]
+    fn should_execute_asrs_r3_r4_shift_50() {
+        let cpu = driver();
+        cpu.write_u16(0x2000_0000, opcode_asrs_reg(3, 4));
+        cpu.set_registers(&[(3, 0x4000_0040), (4, 50)]);
+        cpu.set_flags(false, false, true, false);
+        cpu.single_step();
+        let r = cpu.read_registers();
+        assert_eq!(r.r3, 0);
+        assert_eq!(r.pc, 0x2000_0002);
+        assert!(!r.n && r.z && !r.c);
+    }
+
+    #[test]
+    fn should_execute_asrs_r3_r4_shift_31() {
+        let cpu = driver();
+        cpu.write_u16(0x2000_0000, opcode_asrs_reg(3, 4));
+        cpu.set_registers(&[(3, 0x4000_0040), (4, 31)]);
+        cpu.set_flags(false, false, true, false);
+        cpu.single_step();
+        let r = cpu.read_registers();
+        assert_eq!(r.r3, 0);
+        assert_eq!(r.pc, 0x2000_0002);
+        assert!(!r.n && r.z && r.c);
+    }
+
+    #[test]
+    fn should_execute_asrs_r3_r4_negative_shift_50() {
+        let cpu = driver();
+        cpu.write_u16(0x2000_0000, opcode_asrs_reg(3, 4));
+        cpu.set_registers(&[(3, 0x8000_0040), (4, 50)]);
+        cpu.set_flags(false, false, true, false);
+        cpu.single_step();
+        let r = cpu.read_registers();
+        assert_eq!(r.r3, 0xffff_ffff);
+        assert_eq!(r.pc, 0x2000_0002);
+        assert!(r.n && !r.z && r.c);
+    }
+
+    #[test]
+    fn should_execute_asrs_r3_r4_shift_0() {
+        let cpu = driver();
+        cpu.write_u16(0x2000_0000, opcode_asrs_reg(3, 4));
+        cpu.set_registers(&[(3, 0x8000_0040), (4, 0)]);
+        cpu.set_flags(false, false, true, false);
+        cpu.single_step();
+        let r = cpu.read_registers();
+        assert_eq!(r.r3, 0x8000_0040);
+        assert_eq!(r.pc, 0x2000_0002);
+        assert!(r.n && !r.z && r.c);
+    }
+
+    #[test]
+    fn should_execute_bics_r0_r3() {
+        let cpu = driver();
+        cpu.set_registers(&[(0, 0xff), (3, 0x0f)]);
+        cpu.write_u16(0x2000_0000, opcode_bics(0, 3));
+        cpu.single_step();
+        let r = cpu.read_registers();
+        assert_eq!(r.r0, 0xf0);
+        assert!(!r.n && !r.z);
+    }
+
+    #[test]
+    fn should_execute_bics_r0_r3_and_set_negative() {
+        let cpu = driver();
+        cpu.set_registers(&[(0, 0xffff_ffff), (3, 0x0000_ffff)]);
+        cpu.write_u16(0x2000_0000, opcode_bics(0, 3));
+        cpu.single_step();
+        let r = cpu.read_registers();
+        assert_eq!(r.r0, 0xffff_0000);
+        assert!(r.n && !r.z);
+    }
 }
