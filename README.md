@@ -15,11 +15,14 @@ cargo clippy --all-targets -- -D warnings
 cargo build --release
 ```
 
-The core stage ports the upstream FIFO, time, Cortex-M0+ opcode, PIO opcode,
-RP2040 bus/NVIC, and Cortex-M0+ instruction tests: 239 unit tests. APB
-peripherals beyond PPB/NVIC are stubs until the peripheral stage. See
-`docs/parity.md` for the mapping to the upstream `vitest` suite and the
-remaining stages.
+The library now ports the complete upstream unit-test suite: 322 tests
+(utilities/opcodes 91, Cortex-M0+ 126, RP2040 bus/PPB 22, core peripherals
+83). See `docs/parity.md` for the per-file mapping and documented source-level
+deviations.
+
+Plan 4 still adds the GDB server, Simulator, CLI, and the upstream peripherals
+that have no unit tests (ADC, I2C, SPI, SSI, RTC, Watchdog, RESETS, PSM, PADS,
+IO, Interpolator, and host-mode USB).
 
 ## License
 

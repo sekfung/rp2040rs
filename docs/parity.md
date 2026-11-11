@@ -14,14 +14,14 @@ Upstream baseline: `vitest run src` reports 14 files and 322 passing tests.
 | `utils/time.spec.ts` | `utils/time.rs` | 1 | foundation |
 | `instructions.spec.ts` | `cortex_m0_core.rs` | 126 | core |
 | `rp2040.spec.ts` | `rp2040.rs` | 22 | core |
-| `peripherals/clocks.spec.ts` | `peripherals/clocks.rs` | 16 | plan 3 |
-| `peripherals/dma.spec.ts` | `peripherals/dma.rs` | 2 | plan 3 |
-| `peripherals/pio.spec.ts` | `peripherals/pio.rs` | 35 | plan 3 |
-| `peripherals/pwm.spec.ts` | `peripherals/pwm.rs` | 8 | plan 3 |
-| `peripherals/timer.spec.ts` | `peripherals/timer.rs` | 4 | plan 3 |
-| `peripherals/uart.spec.ts` | `peripherals/uart.rs` | 2 | plan 3 |
-| `sio.spec.ts` | `sio.rs` | 11 | plan 3 |
-| `usb/cdc.spec.ts` | `usb/cdc.rs` | 5 | plan 3 |
+| `peripherals/clocks.spec.ts` | `peripherals/clocks.rs` | 16 | implemented |
+| `peripherals/dma.spec.ts` | `peripherals/dma.rs` | 2 | implemented |
+| `peripherals/pio.spec.ts` | `peripherals/pio.rs` | 35 | implemented |
+| `peripherals/pwm.spec.ts` | `peripherals/pwm.rs` | 8 | implemented |
+| `peripherals/timer.spec.ts` | `peripherals/timer.rs` | 4 | implemented |
+| `peripherals/uart.spec.ts` | `peripherals/uart.rs` | 2 | implemented |
+| `sio.spec.ts` | `sio.rs` | 11 | implemented |
+| `usb/cdc.spec.ts` | `usb/cdc.rs` | 5 | implemented |
 | **Total** | | **322** | |
 
 ## Foundation-stage checkpoint
@@ -37,9 +37,9 @@ At the foundation checkpoint, `cargo test --lib` reported exactly 91 tests:
 `tests/utils.rs`, and `tests/clock.rs`. Non-upstream coverage lives in those
 files so the upstream-ported unit count stays at 322.
 
-## Core status
+## Core-stage checkpoint
 
-`cargo test --lib` reports exactly 239 passing tests:
+At the core checkpoint, `cargo test --lib` reported exactly 239 passing tests:
 
 - foundation utilities and opcode encoders — 91
 - `rp2040::tests` — 22
@@ -48,7 +48,32 @@ files so the upstream-ported unit count stays at 322.
 `cargo test` also passes the integration suites in `tests/smoke.rs`,
 `tests/utils.rs`, `tests/clock.rs`, `tests/core_state.rs`,
 `tests/core_cycles.rs`, and `tests/core_shifts.rs`. APB peripherals other
-than PPB/NVIC are still stubs; Plan 3 replaces them.
+than PPB/NVIC were still stubs at that checkpoint; the peripheral stage
+replaces them.
+
+## Peripheral status
+
+`cargo test --lib` reports exactly 322 passing tests, matching the upstream
+vitest baseline:
+
+| Area | Cases |
+|---|---:|
+| foundation utilities/opcodes | 91 |
+| RP2040 bus/PPB | 22 |
+| Cortex-M0+ instructions | 126 |
+| clocks | 16 |
+| DMA | 2 |
+| PIO | 35 |
+| PWM | 8 |
+| TIMER | 4 |
+| UART | 2 |
+| SIO | 11 |
+| USB CDC | 5 |
+| **Total** | **322** |
+
+`cargo test` also passes the added integration suites under `tests/` for
+clock listeners, core state/cycles/shifts, DMA, PWM/timer regressions, PIO
+scheduling, USB controller paths, and CLI-free library smoke coverage.
 
 ## Count verification note
 
@@ -73,3 +98,20 @@ The per-file figures above are expanded vitest counts, not counts of textual
   the Rust port computes the hardware-correct `V=true`, while upstream
   `substractUpdateFlags` computes `V=false`. No ported test observes this;
   documented as a source-level deviation.
+- PIO `FJOIN_RX/TX` semantics and `SM_CLKDIV`/`CLKDIV_RESTART` pacing are not
+  implemented; upstream has the same gaps and no ported test asserts them.
+- PIO DMA DREQ signaling and the full GPIO pad/function model are deferred to
+  Plan 4; PIO-driven input values are propagated.
+- USB host-mode SOF/host-transaction alarms, host SIE_STATUS mapping, and host
+  device-connected events are deferred to Plan 4; device-mode CDC is covered.
+- PWM `CHn_DIV` timing, CTR free-running, TOP/CC double buffering, and wrap
+  DREQ are deferred; the ported phase/wrap cases are covered.
+- Full UART interrupt/line-buffer registers and callbacks are deferred; word
+  length, baud, and `clk_peri` retuning are implemented.
+- TIMER ALARM writes use raw values rather than atomic aliases; normal writes
+  are implemented.
+- SIO initial divisor is 0 rather than upstream's 1, and INTERP0/INTERP1 are
+  Plan 4 stubs; the 11 SIO tests cover divider/spinlock behavior.
+- TREQ_TIMER3 uses hardware-correct bits 16-31; upstream's 36-bit shift is a
+  source-level bug and is not copied.
+- `set_logger` called from inside a logger callback is unsupported.
