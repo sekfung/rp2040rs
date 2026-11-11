@@ -14,3 +14,10 @@ pub use setup::{
 pub use usb_device::{
     is_standard_request, StandardRequestCode, UsbDevice, UsbTransferResult, UsbTransferStatus,
 };
+
+/// Upstream `StandardRequest` is the same enum as `StandardRequestCode`.
+pub type StandardRequest = StandardRequestCode;
+/// Upstream aliases `DescriptorType` as `USBDescriptorType`.
+pub use interfaces::DescriptorType as UsbDescriptorType;
+/// Upstream's `ISetupPacketParams` is our `SetupPacketParams`.
+pub type ISetupPacketParams = SetupPacketParams;

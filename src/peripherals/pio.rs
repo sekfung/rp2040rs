@@ -65,7 +65,8 @@ enum WaitType {
 }
 
 #[derive(Clone, Debug)]
-struct StateMachine {
+/// One PIO state machine. Exported for API parity with upstream `StateMachine`.
+pub struct StateMachine {
     enabled: bool,
     x: u32,
     y: u32,

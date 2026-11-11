@@ -66,6 +66,24 @@ enum I2cState {
     Connected,
 }
 
+/// I2C transfer direction, matching upstream `I2CMode`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u32)]
+pub enum I2cMode {
+    Write = 0,
+    Read = 1,
+}
+
+/// I2C bus speed class, matching upstream `I2CSpeed`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u32)]
+pub enum I2cSpeed {
+    Invalid = 0,
+    Standard = 1,
+    FastMode = 2,
+    HighSpeedMode = 3,
+}
+
 #[derive(Clone)]
 pub struct I2c {
     name: String,
