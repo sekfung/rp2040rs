@@ -7,6 +7,7 @@ use crate::cortex_m0_core::Core;
 use crate::gpio_pin::GpioPin;
 use crate::peripherals::clocks::Clocks;
 use crate::peripherals::dma::Dma;
+use crate::peripherals::pio::Pio;
 use crate::peripherals::pll::Pll;
 use crate::peripherals::ppb::Ppb;
 use crate::peripherals::pwm::Pwm;
@@ -138,6 +139,7 @@ pub struct BoardShared {
     pub uart: [Option<Uart>; 2],
     pub sio: Option<Sio>,
     pub dma: Option<Dma>,
+    pub pio: [Option<Pio>; 2],
     pub usb_ctrl: Option<UsbController>,
     pub gpio: [GpioPin; 30],
     pub qspi: [GpioPin; 6],
@@ -162,6 +164,7 @@ pub struct Rp2040 {
     pub uart: [Uart; 2],
     pub sio: Sio,
     pub dma: Dma,
+    pub pio: [Pio; 2],
     pub usb_ctrl: UsbController,
     pub gpio: [GpioPin; 30],
     pub qspi: [GpioPin; 6],
@@ -209,6 +212,7 @@ impl Rp2040 {
                 uart: [None, None],
                 sio: None,
                 dma: None,
+                pio: [None, None],
                 usb_ctrl: None,
                 gpio: gpio.clone(),
                 qspi: qspi.clone(),
@@ -229,6 +233,8 @@ impl Rp2040 {
         ];
         let sio = Sio::new(core.clone(), weak.clone());
         let dma = Dma::new(weak.clone());
+        let pio0 = Pio::new("PIO0", crate::irq::Irq::Pio0Irq0 as u32, 0, weak.clone());
+        let pio1 = Pio::new("PIO1", crate::irq::Irq::Pio1Irq0 as u32, 1, weak.clone());
         let usb_ctrl = UsbController::new("USB", weak.clone());
         {
             let mut board = shared.borrow_mut();
@@ -242,8 +248,10 @@ impl Rp2040 {
             board.uart = [Some(uart[0].clone()), Some(uart[1].clone())];
             board.sio = Some(sio.clone());
             board.dma = Some(dma.clone());
+            board.pio = [Some(pio0.clone()), Some(pio1.clone())];
             board.usb_ctrl = Some(usb_ctrl.clone());
         }
+        let pio = [pio0, pio1];
         let rp2040 = Self {
             shared: shared.clone(),
             clock,
@@ -262,6 +270,7 @@ impl Rp2040 {
             uart,
             sio,
             dma,
+            pio,
             usb_ctrl,
             gpio,
             qspi,
@@ -316,7 +325,7 @@ impl Rp2040 {
     }
 
     fn register_real_peripherals(&self) {
-        let entries: [(u32, Rc<dyn Peripheral>); 7] = [
+        let entries: [(u32, Rc<dyn Peripheral>); 9] = [
             (0x40008, Rc::new(self.clocks.clone())),
             (0x40024, Rc::new(self.xosc.clone())),
             (0x40028, Rc::new(self.pll_sys.clone())),
@@ -324,6 +333,8 @@ impl Rp2040 {
             (0x40050, Rc::new(self.pwm.clone())),
             (0x40054, Rc::new(self.timer.clone())),
             (0x50110, Rc::new(self.usb_ctrl.clone())),
+            (0x50200, Rc::new(self.pio[0].clone())),
+            (0x50300, Rc::new(self.pio[1].clone())),
         ];
         for (key, peripheral) in entries {
             self.set_peripheral(key, peripheral);

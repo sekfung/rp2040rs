@@ -1,6 +1,7 @@
 pub mod clocks;
 pub mod dma;
 pub mod peripheral;
+pub mod pio;
 pub mod pll;
 pub mod ppb;
 pub mod pwm;
