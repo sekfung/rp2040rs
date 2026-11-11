@@ -34,11 +34,11 @@ fn out_endpoint_completion_uses_out_control_register() {
     let rp = Rp2040::with_clock(clock.clone());
     // Endpoint 2 OUT control: buffer offset 0x200; buffer-control length 4.
     rp.write_u32(0x5010_0014, 0x200);
-    rp.write_u32(0x5011_0094, 4);
+    rp.write_u32(0x5010_0094, 4);
     rp.usb_ctrl.endpoint_read_done(2, &[0xaa, 0xbb], 0);
     clock.advance(10);
 
-    let control = rp.read_u32(0x5011_0094);
+    let control = rp.read_u32(0x5010_0094);
     assert_eq!(control & 0x3ff, 2);
     assert_ne!(control & (1 << 15), 0);
     assert_eq!(rp.usb_dpram.byte(0x200), 0xaa);
@@ -61,9 +61,33 @@ fn dpram_update_clears_available_and_full_and_dispatches_bytes() {
     // Endpoint 0 IN transfer: AVAILABLE | FULL | length 2.
     rp.write_u32(0x5010_0080, (1 << 10) | (1 << 15) | 2);
 
-    let control = rp.read_u32(0x5011_0080);
+    let control = rp.read_u32(0x5010_0080);
     assert_eq!(control & (1 << 10), 0);
     assert_eq!(control & (1 << 15), 0);
     clock.advance(10);
     assert_eq!(&*written.borrow(), &[0x12, 0x34]);
+}
+
+#[test]
+fn controller_interrupt_registers_do_not_alias_dpram() {
+    let rp = Rp2040::new();
+    rp.usb_dpram.set_byte(0x90, 0x55);
+    rp.write_u32(0x5011_0090, 0x2);
+    assert_eq!(rp.read_u32(0x5011_0090), 0x2);
+    assert_eq!(rp.usb_dpram.byte(0x90), 0x55);
+}
+
+#[test]
+fn double_buffer_in_completion_clears_buffer1_available_and_full() {
+    let clock = Rc::new(MockClock::new());
+    let rp = Rp2040::with_clock(clock.clone());
+    // Endpoint 2 IN control: double buffer, buffer offset 0x200.
+    rp.write_u32(0x5010_0010, (1 << 30) | 0x200);
+    // Buffer 0 and buffer 1 both available; buffer 1 length 1, data at 0x240.
+    let value = (1 << 10) | (1 << 15) | 1 | ((1 << 10) << 16) | ((1 << 15) << 16) | (1 << 16);
+    rp.write_u32(0x5010_0090, value);
+
+    let control = rp.read_u32(0x5010_0090);
+    assert_eq!(control & ((1 << 10) << 16), 0);
+    assert_eq!(control & ((1 << 15) << 16), 0);
 }

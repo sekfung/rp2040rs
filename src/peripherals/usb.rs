@@ -241,29 +241,30 @@ impl UsbController {
             )
         };
         let buffer1_available = (value >> USB_BUF1_SHIFT) & USB_BUF_CTRL_AVAILABLE != 0;
+        let mut value = value;
         if double && buffer1_available {
             let buffer1 = (value >> USB_BUF1_SHIFT) & USB_BUF_CTRL_LEN_MASK;
             let buffer_offset = self.endpoint_buffer_offset(endpoint, buffer_out) + 64;
-            let mut cleared = value & !(USB_BUF_CTRL_AVAILABLE << USB_BUF1_SHIFT);
-            self.write_dpram(offset, &cleared.to_le_bytes());
+            value &= !(USB_BUF_CTRL_AVAILABLE << USB_BUF1_SHIFT);
+            self.write_dpram(offset, &value.to_le_bytes());
             if buffer_out {
                 self.call_endpoint_read(endpoint, buffer1 as usize);
             } else {
-                cleared &= !(USB_BUF_CTRL_FULL << USB_BUF1_SHIFT);
-                self.write_dpram(offset, &cleared.to_le_bytes());
+                value &= !(USB_BUF_CTRL_FULL << USB_BUF1_SHIFT);
+                self.write_dpram(offset, &value.to_le_bytes());
                 let buffer = self.read_dpram(buffer_offset, buffer1 as usize);
                 self.indicate_buffer_ready(endpoint, false);
                 self.schedule_write(endpoint, buffer);
             }
         }
         let buffer_offset = self.endpoint_buffer_offset(endpoint, buffer_out);
-        let mut cleared = value & !USB_BUF_CTRL_AVAILABLE;
-        self.write_dpram(offset, &cleared.to_le_bytes());
+        value &= !USB_BUF_CTRL_AVAILABLE;
+        self.write_dpram(offset, &value.to_le_bytes());
         if buffer_out {
             self.call_endpoint_read(endpoint, length as usize);
         } else {
-            cleared &= !USB_BUF_CTRL_FULL;
-            self.write_dpram(offset, &cleared.to_le_bytes());
+            value &= !USB_BUF_CTRL_FULL;
+            self.write_dpram(offset, &value.to_le_bytes());
             let buffer = self.read_dpram(buffer_offset, length as usize);
             if interrupt || !double {
                 self.indicate_buffer_ready(endpoint, false);
@@ -284,18 +285,16 @@ impl UsbController {
         let callback = self.state.borrow_mut().on_endpoint_read.take();
         if let Some(mut callback) = callback {
             callback(endpoint, length);
-            self.state.borrow_mut().on_endpoint_read = Some(callback);
+            let mut state = self.state.borrow_mut();
+            if state.on_endpoint_read.is_none() {
+                state.on_endpoint_read = Some(callback);
+            }
         }
     }
 
     fn read_endpoint_control(&self, endpoint: u32, out: bool) -> u32 {
         let offset = EP1_IN_CONTROL + 8 * (endpoint - 1) + if out { 4 } else { 0 };
         self.dpram_word(offset)
-    }
-
-    fn is_dpram_register(offset: u32) -> bool {
-        (EP1_IN_CONTROL..=ADDR_ENDP15).contains(&offset)
-            || (EP0_IN_BUFFER_CONTROL..=EP15_OUT_BUFFER_CONTROL).contains(&offset)
     }
 
     fn endpoint_buffer_offset(&self, endpoint: u32, out: bool) -> u32 {
@@ -333,7 +332,7 @@ impl UsbController {
             .map(|b| {
                 let memory = b.borrow().usb_dpram.clone();
                 let bytes = memory.borrow();
-                let start = offset as usize;
+                let start = (offset as usize).min(bytes.len());
                 let end = (start + length).min(bytes.len());
                 bytes[start..end].to_vec()
             })
@@ -436,7 +435,10 @@ fn flush_endpoint_write(
             for buffer in buffers {
                 callback(endpoint as u32, buffer);
             }
-            state.borrow_mut().on_endpoint_write = Some(callback);
+            let mut state = state.borrow_mut();
+            if state.on_endpoint_write.is_none() {
+                state.on_endpoint_write = Some(callback);
+            }
         }
         drop(board);
     }
@@ -459,9 +461,6 @@ impl Peripheral for UsbController {
     fn read_u32(&self, offset: u32) -> u32 {
         if (ADDR_ENDP1..=ADDR_ENDP15).contains(&offset) && offset & 3 == 0 {
             return self.state.borrow().int_ep_addr[((offset - ADDR_ENDP1) >> 2) as usize];
-        }
-        if Self::is_dpram_register(offset) {
-            return self.dpram_word(offset);
         }
         let state = self.state.borrow();
         match offset {
@@ -493,13 +492,6 @@ impl Peripheral for UsbController {
             self.state.borrow_mut().int_ep_addr[((offset - ADDR_ENDP1) >> 2) as usize] = value;
             return;
         }
-        if Self::is_dpram_register(offset) {
-            self.write_dpram(offset, &value.to_le_bytes());
-            if offset >= EP0_IN_BUFFER_CONTROL {
-                self.dpram_updated(offset, value);
-            }
-            return;
-        }
         match offset {
             ADDR_ENDP => self.state.borrow_mut().addr_endp = value,
             MAIN_CTRL => {
@@ -514,7 +506,10 @@ impl Peripheral for UsbController {
                     let callback = self.state.borrow_mut().on_usb_enabled.take();
                     if let Some(mut callback) = callback {
                         callback();
-                        self.state.borrow_mut().on_usb_enabled = Some(callback);
+                        let mut state = self.state.borrow_mut();
+                        if state.on_usb_enabled.is_none() {
+                            state.on_usb_enabled = Some(callback);
+                        }
                     }
                 }
             }
@@ -525,7 +520,10 @@ impl Peripheral for UsbController {
                     let callback = self.state.borrow_mut().on_reset_received.take();
                     if let Some(mut callback) = callback {
                         callback();
-                        self.state.borrow_mut().on_reset_received = Some(callback);
+                        let mut state = self.state.borrow_mut();
+                        if state.on_reset_received.is_none() {
+                            state.on_reset_received = Some(callback);
+                        }
                     }
                     let mut state = self.state.borrow_mut();
                     state.sie_status &= !(SIE_LINE_STATE_MASK << SIE_LINE_STATE_SHIFT);
