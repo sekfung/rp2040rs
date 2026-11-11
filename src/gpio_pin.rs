@@ -37,6 +37,8 @@ pub struct GpioPin {
     irq_force_mask: Rc<Cell<u32>>,
     irq_status: Rc<Cell<u32>>,
     last_state: Rc<Cell<GpioPinState>>,
+    raw_output_value: Rc<Cell<bool>>,
+    raw_output_enable: Rc<Cell<bool>>,
 }
 
 impl GpioPin {
@@ -50,6 +52,8 @@ impl GpioPin {
             irq_force_mask: Rc::new(Cell::new(0)),
             irq_status: Rc::new(Cell::new(0)),
             last_state: Rc::new(Cell::new(GpioPinState::Input)),
+            raw_output_value: Rc::new(Cell::new(false)),
+            raw_output_enable: Rc::new(Cell::new(false)),
         }
     }
 
@@ -98,6 +102,28 @@ impl GpioPin {
         apply_override(value, (self.ctrl.get() >> 16) & 0x3)
     }
 
+    pub fn set_output(&self, value: bool, enable: bool) {
+        self.raw_output_value.set(value);
+        self.raw_output_enable.set(enable);
+        self.raw_input_value.set(value);
+    }
+
+    pub fn raw_output_value(&self) -> bool {
+        self.raw_output_value.get()
+    }
+
+    pub fn raw_output_enable(&self) -> bool {
+        self.raw_output_enable.get()
+    }
+
+    pub fn output_value(&self) -> bool {
+        apply_override(self.raw_output_value.get(), (self.ctrl.get() >> 8) & 0x3)
+    }
+
+    pub fn output_enable(&self) -> bool {
+        apply_override(self.raw_output_enable.get(), (self.ctrl.get() >> 12) & 0x3)
+    }
+
     pub fn irq_enable_mask(&self) -> u32 {
         self.irq_enable_mask.get()
     }
@@ -138,11 +164,29 @@ impl GpioPin {
         if self.raw_input_value.get() {
             status |= 1 << 17;
         }
+        if self.output_enable() {
+            status |= 1 << 13;
+        }
+        if self.raw_output_enable.get() {
+            status |= 1 << 12;
+        }
+        if self.output_value() {
+            status |= 1 << 9;
+        }
+        if self.raw_output_value.get() {
+            status |= 1 << 8;
+        }
         status
     }
 
     pub fn state(&self) -> GpioPinState {
-        if self.pulldown_enabled() && self.pullup_enabled() {
+        if self.output_enable() {
+            if self.output_value() {
+                GpioPinState::High
+            } else {
+                GpioPinState::Low
+            }
+        } else if self.pulldown_enabled() && self.pullup_enabled() {
             GpioPinState::InputBusKeeper
         } else if self.pulldown_enabled() {
             GpioPinState::InputPullDown

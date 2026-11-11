@@ -3,6 +3,7 @@ use std::rc::{Rc, Weak};
 
 use crate::clock::Alarm;
 use crate::irq::Irq;
+use crate::peripherals::dma::DreqChannel;
 use crate::peripherals::peripheral::{atomic_update, Peripheral};
 use crate::rp2040::BoardShared;
 use crate::utils::Timer32;
@@ -40,6 +41,11 @@ struct PwmState {
     ctr: [u32; 8],
     cc: [u32; 8],
     top: [u32; 8],
+    cc_pending: [u32; 8],
+    top_pending: [u32; 8],
+    cc_updated: [bool; 8],
+    top_updated: [bool; 8],
+    div_prescaler: [f64; 8],
     alarms: Vec<Alarm>,
     clock_freq: f64,
     int_raw: u32,
@@ -59,6 +65,11 @@ impl Pwm {
             ctr: [0; 8],
             cc: [0; 8],
             top: [0xffff; 8],
+            cc_pending: [0; 8],
+            top_pending: [0xffff; 8],
+            cc_updated: [false; 8],
+            top_updated: [false; 8],
+            div_prescaler: [1.0; 8],
             alarms: Vec::with_capacity(8),
             clock_freq: 125_000_000.0,
             int_raw: 0,
@@ -70,7 +81,7 @@ impl Pwm {
             let state_for_alarm = state.clone();
             let board_for_alarm = board.clone();
             let alarm = clock.create_alarm(Box::new(move || {
-                pwm_wrap(&state_for_alarm, &board_for_alarm, index);
+                pwm_tick(&state_for_alarm, &board_for_alarm, index);
             }));
             alarms.push(alarm);
         }
@@ -107,6 +118,11 @@ impl Pwm {
         state.ctr = [0; 8];
         state.cc = [0; 8];
         state.top = [0xffff; 8];
+        state.cc_pending = [0; 8];
+        state.top_pending = [0xffff; 8];
+        state.cc_updated = [false; 8];
+        state.top_updated = [false; 8];
+        state.div_prescaler = [1.0; 8];
         state.int_raw = 0;
         state.int_enable = 0;
         state.int_force = 0;
@@ -126,11 +142,9 @@ impl Pwm {
     }
 
     fn schedule_wrap(&self, index: usize) {
-        let (ctr, top, freq, enabled, mut alarm) = {
+        let (freq, enabled, mut alarm) = {
             let state = self.state.borrow();
             (
-                state.ctr[index],
-                state.top[index],
                 state.clock_freq,
                 state.csr[index] & CSR_EN != 0,
                 state.alarms[index].clone(),
@@ -140,10 +154,80 @@ impl Pwm {
             alarm.cancel();
             return;
         }
-        let cycles = if top >= ctr { top - ctr + 1 } else { top + 1 };
-        let nanos = f64::from(cycles) * 1_000_000_000.0 / freq;
+        let prescaler = self.state.borrow().div_prescaler[index];
+        let nanos = prescaler * 1_000_000_000.0 / freq;
         alarm.schedule(nanos);
         self.state.borrow_mut().alarms[index] = alarm;
+    }
+
+    fn apply_double_buffered(&self, index: usize) {
+        let mut state = self.state.borrow_mut();
+        if state.cc_updated[index] {
+            state.cc[index] = state.cc_pending[index];
+            state.cc_updated[index] = false;
+        }
+        if state.top_updated[index] {
+            state.top[index] = state.top_pending[index];
+            state.top_updated[index] = false;
+        }
+    }
+
+    fn set_pin_direction(&self, pin: usize, output: bool) {
+        if let Some(board) = self.board.upgrade() {
+            if let Some(gpio) = board.borrow().gpio.get(pin) {
+                let value = gpio.raw_output_value();
+                gpio.set_output(value, output);
+            }
+        }
+    }
+
+    fn set_direction(&self, index: usize, output: bool) {
+        self.set_pin_direction(index * 2, output);
+        self.set_pin_direction(index * 2 + 1, output);
+        if index < 7 {
+            self.set_pin_direction(16 + index * 2, output);
+            self.set_pin_direction(17 + index * 2, output);
+        }
+    }
+
+    pub fn gpio_value(&self) -> u32 {
+        self.board
+            .upgrade()
+            .map(|board| {
+                board
+                    .borrow()
+                    .gpio
+                    .iter()
+                    .enumerate()
+                    .fold(0, |acc, (index, pin)| {
+                        if pin.raw_output_enable() && pin.raw_output_value() {
+                            acc | (1 << index)
+                        } else {
+                            acc
+                        }
+                    })
+            })
+            .unwrap_or(0)
+    }
+
+    pub fn gpio_direction(&self) -> u32 {
+        self.board
+            .upgrade()
+            .map(|board| {
+                board
+                    .borrow()
+                    .gpio
+                    .iter()
+                    .enumerate()
+                    .fold(0, |acc, (index, pin)| {
+                        if pin.raw_output_enable() {
+                            acc | (1 << index)
+                        } else {
+                            acc
+                        }
+                    })
+            })
+            .unwrap_or(0)
     }
 
     fn cancel_wrap(&self, index: usize) {
@@ -170,11 +254,14 @@ impl Pwm {
         };
         match register {
             CHN_CSR => {
-                let mut state = self.state.borrow_mut();
                 let old_enabled = old_csr & CSR_EN != 0;
+                let new_enabled = atomic_value & CSR_EN != 0;
+                if new_enabled && !old_enabled {
+                    self.apply_double_buffered(index);
+                }
+                let mut state = self.state.borrow_mut();
                 state.csr[index] = atomic_value & !(CSR_PH_ADV | CSR_PH_RET);
-                let enabled = state.csr[index] & CSR_EN != 0;
-                if enabled {
+                if new_enabled {
                     if atomic_value & CSR_PH_ADV != 0 {
                         let modulus = state.top[index].wrapping_add(1);
                         state.ctr[index] = state.ctr[index].wrapping_add(1) % modulus;
@@ -188,48 +275,135 @@ impl Pwm {
                     }
                 }
                 drop(state);
-                if enabled {
+                self.set_direction(index, new_enabled);
+                if new_enabled {
                     self.schedule_wrap(index);
                 } else if old_enabled {
                     self.cancel_wrap(index);
                 }
             }
-            CHN_DIV => self.state.borrow_mut().div[index] = atomic_value & 0x000f_ffff,
+            CHN_DIV => {
+                let div = atomic_value & 0x000f_ffff;
+                let int_value = (div >> 4) & 0xff;
+                let frac_value = div & 0xf;
+                let prescaler = if int_value == 0 {
+                    256.0
+                } else {
+                    f64::from(int_value)
+                } + f64::from(frac_value) / 16.0;
+                let mut state = self.state.borrow_mut();
+                state.div[index] = div;
+                state.div_prescaler[index] = prescaler;
+            }
             CHN_CTR => {
                 self.state.borrow_mut().ctr[index] = atomic_value & 0xffff;
                 self.schedule_wrap(index);
             }
-            CHN_CC => self.state.borrow_mut().cc[index] = atomic_value,
+            CHN_CC => {
+                let mut state = self.state.borrow_mut();
+                state.cc_pending[index] = atomic_value;
+                state.cc_updated[index] = true;
+            }
             CHN_TOP => {
-                self.state.borrow_mut().top[index] = atomic_value & 0xffff;
-                self.schedule_wrap(index);
+                let mut state = self.state.borrow_mut();
+                state.top_pending[index] = atomic_value & 0xffff;
+                state.top_updated[index] = true;
             }
             _ => {}
         }
     }
 }
 
-fn pwm_wrap(state: &Rc<RefCell<PwmState>>, board: &Weak<RefCell<BoardShared>>, index: usize) {
-    let rearm = {
+fn pwm_tick(state: &Rc<RefCell<PwmState>>, board: &Weak<RefCell<BoardShared>>, index: usize) {
+    let (wrapped, cc, ctr, enabled, freq, prescaler, mut alarm) = {
         let mut state = state.borrow_mut();
-        state.int_raw |= 1 << index;
-        state.ctr[index] = 0;
-        let enabled = state.csr[index] & CSR_EN != 0;
-        let top = state.top[index];
-        let freq = state.clock_freq;
-        if enabled && freq > 0.0 {
-            let alarm = state.alarms[index].clone();
-            Some((
-                alarm,
-                f64::from(top.wrapping_add(1)) * 1_000_000_000.0 / freq,
-            ))
-        } else {
-            None
+        state.ctr[index] = state.ctr[index].wrapping_add(1);
+        let mut wrapped = false;
+        if state.ctr[index] > state.top[index] {
+            state.ctr[index] = 0;
+            state.int_raw |= 1 << index;
+            if state.cc_updated[index] {
+                state.cc[index] = state.cc_pending[index];
+                state.cc_updated[index] = false;
+            }
+            if state.top_updated[index] {
+                state.top[index] = state.top_pending[index];
+                state.top_updated[index] = false;
+            }
+            wrapped = true;
         }
+        let enabled = state.csr[index] & CSR_EN != 0;
+        let freq = state.clock_freq;
+        (
+            wrapped,
+            state.cc[index],
+            state.ctr[index],
+            enabled,
+            freq,
+            state.div_prescaler[index],
+            state.alarms[index].clone(),
+        )
     };
-    if let Some((mut alarm, nanos)) = rearm {
-        alarm.schedule(nanos);
+    if enabled && freq > 0.0 {
+        alarm.schedule(prescaler * 1_000_000_000.0 / freq);
         state.borrow_mut().alarms[index] = alarm;
+    } else {
+        alarm.cancel();
+    }
+    if wrapped {
+        if let Some(board) = board.upgrade() {
+            if let Some(gpio) = board.borrow().gpio.get(index * 2) {
+                gpio.set_output(cc & 0xffff != 0, true);
+            }
+            if let Some(gpio) = board.borrow().gpio.get(index * 2 + 1) {
+                gpio.set_output(cc >> 16 != 0, true);
+            }
+            if index < 7 {
+                if let Some(gpio) = board.borrow().gpio.get(16 + index * 2) {
+                    gpio.set_output(cc & 0xffff != 0, true);
+                }
+                if let Some(gpio) = board.borrow().gpio.get(17 + index * 2) {
+                    gpio.set_output(cc >> 16 != 0, true);
+                }
+            }
+            let dma = board.borrow().dma.clone();
+            if let Some(dma) = dma {
+                let channel = match index {
+                    0 => DreqChannel::PwmWrap0,
+                    1 => DreqChannel::PwmWrap1,
+                    2 => DreqChannel::PwmWrap2,
+                    3 => DreqChannel::PwmWrap3,
+                    4 => DreqChannel::PwmWrap4,
+                    5 => DreqChannel::PwmWrap5,
+                    6 => DreqChannel::PwmWrap6,
+                    _ => DreqChannel::PwmWrap7,
+                };
+                dma.set_dreq(channel);
+            }
+        }
+    } else {
+        if let Some(board) = board.upgrade() {
+            if ctr == (cc & 0xffff) {
+                if let Some(gpio) = board.borrow().gpio.get(index * 2) {
+                    gpio.set_output(false, true);
+                }
+                if index < 7 {
+                    if let Some(gpio) = board.borrow().gpio.get(16 + index * 2) {
+                        gpio.set_output(false, true);
+                    }
+                }
+            }
+            if ctr == (cc >> 16) {
+                if let Some(gpio) = board.borrow().gpio.get(index * 2 + 1) {
+                    gpio.set_output(false, true);
+                }
+                if index < 7 {
+                    if let Some(gpio) = board.borrow().gpio.get(17 + index * 2) {
+                        gpio.set_output(false, true);
+                    }
+                }
+            }
+        }
     }
     if let Some(board) = board.upgrade() {
         let core = board.borrow().core.clone();
@@ -298,6 +472,12 @@ impl Peripheral for Pwm {
                 for index in 0..8 {
                     let old_enabled = self.state.borrow().csr[index] & CSR_EN != 0;
                     let enabled = enabled_mask & (1 << index) != 0;
+                    if enabled && !old_enabled {
+                        self.apply_double_buffered(index);
+                        self.set_direction(index, true);
+                    } else if !enabled && old_enabled {
+                        self.set_direction(index, false);
+                    }
                     {
                         let mut state = self.state.borrow_mut();
                         if enabled {

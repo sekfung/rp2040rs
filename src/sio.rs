@@ -144,6 +144,18 @@ impl Sio {
             .unwrap_or(0)
     }
 
+    fn sync_gpio(&self, output: u32, output_enable: u32) {
+        if let Some(board) = self.board.upgrade() {
+            let board = board.borrow();
+            for (index, pin) in board.gpio.iter().enumerate() {
+                pin.set_output(
+                    output & (1 << index) != 0,
+                    output_enable & (1 << index) != 0,
+                );
+            }
+        }
+    }
+
     fn qspi_values(&self) -> u32 {
         self.board
             .upgrade()
@@ -292,16 +304,37 @@ impl Sio {
             self.state.borrow_mut().spin_lock &= !bit;
             return;
         }
+        if matches!(
+            offset,
+            GPIO_OUT
+                | GPIO_OUT_SET
+                | GPIO_OUT_CLR
+                | GPIO_OUT_XOR
+                | GPIO_OE
+                | GPIO_OE_SET
+                | GPIO_OE_CLR
+                | GPIO_OE_XOR
+        ) {
+            let (output, output_enable) = {
+                let mut state = self.state.borrow_mut();
+                match offset {
+                    GPIO_OUT => state.gpio_value = value & GPIO_MASK,
+                    GPIO_OUT_SET => state.gpio_value |= value & GPIO_MASK,
+                    GPIO_OUT_CLR => state.gpio_value &= !value,
+                    GPIO_OUT_XOR => state.gpio_value ^= value & GPIO_MASK,
+                    GPIO_OE => state.gpio_output_enable = value & GPIO_MASK,
+                    GPIO_OE_SET => state.gpio_output_enable |= value & GPIO_MASK,
+                    GPIO_OE_CLR => state.gpio_output_enable &= !value,
+                    GPIO_OE_XOR => state.gpio_output_enable ^= value & GPIO_MASK,
+                    _ => unreachable!(),
+                }
+                (state.gpio_value, state.gpio_output_enable)
+            };
+            self.sync_gpio(output, output_enable);
+            return;
+        }
         let mut state = self.state.borrow_mut();
         match offset {
-            GPIO_OUT => state.gpio_value = value & GPIO_MASK,
-            GPIO_OUT_SET => state.gpio_value |= value & GPIO_MASK,
-            GPIO_OUT_CLR => state.gpio_value &= !value,
-            GPIO_OUT_XOR => state.gpio_value ^= value & GPIO_MASK,
-            GPIO_OE => state.gpio_output_enable = value & GPIO_MASK,
-            GPIO_OE_SET => state.gpio_output_enable |= value & GPIO_MASK,
-            GPIO_OE_CLR => state.gpio_output_enable &= !value,
-            GPIO_OE_XOR => state.gpio_output_enable ^= value & GPIO_MASK,
             GPIO_HI_OUT => state.qspi_gpio_value = value & GPIO_MASK,
             GPIO_HI_OUT_SET => state.qspi_gpio_value |= value & GPIO_MASK,
             GPIO_HI_OUT_CLR => state.qspi_gpio_value &= !value,

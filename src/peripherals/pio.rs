@@ -2,6 +2,7 @@ use std::cell::RefCell;
 use std::rc::{Rc, Weak};
 
 use crate::clock::Alarm;
+use crate::peripherals::dma::DreqChannel;
 use crate::peripherals::{atomic_update, Peripheral};
 use crate::rp2040::BoardShared;
 use crate::utils::Fifo;
@@ -256,7 +257,12 @@ impl Pio {
         let board = board.borrow();
         let mut value = 0;
         for (index, pin) in board.gpio.iter().enumerate() {
-            if pin.input_value() {
+            let pin_value = if pin.raw_output_enable() {
+                pin.raw_output_value()
+            } else {
+                pin.input_value()
+            };
+            if pin_value {
                 value |= 1 << index;
             }
         }
@@ -268,10 +274,13 @@ impl Pio {
             return false;
         };
         let borrowed = board.borrow();
-        borrowed
-            .gpio
-            .get(pin as usize)
-            .is_some_and(|pin| pin.input_value())
+        borrowed.gpio.get(pin as usize).is_some_and(|pin| {
+            if pin.raw_output_enable() {
+                pin.raw_output_value()
+            } else {
+                pin.input_value()
+            }
+        })
     }
 
     fn update_interrupts(&self, state: &PioState) {
@@ -281,6 +290,50 @@ impl Pio {
             let board = board.borrow();
             board.core.set_interrupt(self.first_irq, status0 != 0);
             board.core.set_interrupt(self.first_irq + 1, status1 != 0);
+        }
+        self.update_dreqs(state);
+    }
+
+    fn update_dreqs(&self, state: &PioState) {
+        let Some(board) = self.board() else {
+            return;
+        };
+        let dma = board.borrow().dma.clone();
+        let Some(dma) = dma else {
+            return;
+        };
+        for index in 0..4 {
+            let machine = &state.machines[index];
+            let tx_channel = match (self.index, index) {
+                (0, 0) => DreqChannel::Pio0Tx0,
+                (0, 1) => DreqChannel::Pio0Tx1,
+                (0, 2) => DreqChannel::Pio0Tx2,
+                (0, 3) => DreqChannel::Pio0Tx3,
+                (1, 0) => DreqChannel::Pio1Tx0,
+                (1, 1) => DreqChannel::Pio1Tx1,
+                (1, 2) => DreqChannel::Pio1Tx2,
+                _ => DreqChannel::Pio1Tx3,
+            };
+            let rx_channel = match (self.index, index) {
+                (0, 0) => DreqChannel::Pio0Rx0,
+                (0, 1) => DreqChannel::Pio0Rx1,
+                (0, 2) => DreqChannel::Pio0Rx2,
+                (0, 3) => DreqChannel::Pio0Rx3,
+                (1, 0) => DreqChannel::Pio1Rx0,
+                (1, 1) => DreqChannel::Pio1Rx1,
+                (1, 2) => DreqChannel::Pio1Rx2,
+                _ => DreqChannel::Pio1Rx3,
+            };
+            if machine.tx_fifo.full() {
+                dma.clear_dreq(tx_channel);
+            } else {
+                dma.set_dreq(tx_channel);
+            }
+            if machine.rx_fifo.empty() {
+                dma.clear_dreq(rx_channel);
+            } else {
+                dma.set_dreq(rx_channel);
+            }
         }
     }
 
@@ -303,7 +356,9 @@ impl Pio {
             for index in 0..30 {
                 let bit = 1u32 << index;
                 if changed & bit != 0 && directions & bit != 0 {
-                    board.gpio[index].set_input_value(values & bit != 0);
+                    board.gpio[index].set_output(values & bit != 0, true);
+                } else if changed & bit != 0 {
+                    board.gpio[index].set_output(false, false);
                 }
             }
         }
@@ -823,6 +878,15 @@ impl Pio {
     }
 
     fn read_fifo(&self, state: &mut PioState, index: usize) -> u32 {
+        if state.machines[index].shift_ctrl & (1 << 30) != 0 {
+            if state.machines[index].tx_fifo.empty() {
+                state.fdebug |= FDEBUG_RXUNDER << index;
+                return 0;
+            }
+            let value = state.machines[index].tx_fifo.pull();
+            self.update_interrupts(state);
+            return value;
+        }
         if state.machines[index].rx_fifo.empty() {
             state.fdebug |= FDEBUG_RXUNDER << index;
             return 0;
@@ -934,16 +998,71 @@ impl Pio {
             .board()
             .map(|board| board.borrow().clk_sys)
             .unwrap_or(125_000_000.0);
+        let divisor = {
+            let state = self.state.borrow();
+            state
+                .machines
+                .iter()
+                .filter(|machine| machine.enabled)
+                .map(|machine| {
+                    let int = if machine.clock_div_int == 0 {
+                        65536.0
+                    } else {
+                        f64::from(machine.clock_div_int)
+                    };
+                    int + f64::from(machine.clock_div_frac) / 256.0
+                })
+                .fold(f64::MAX, f64::min)
+        };
+        let divisor = if divisor.is_finite() { divisor } else { 1.0 };
         if clk_sys > 0.0 {
-            1000.0 * 1e9 / clk_sys
+            1000.0 * 1e9 * divisor / clk_sys
         } else {
             8000.0
+        }
+    }
+
+    pub fn reset(&self) {
+        self.stop();
+        {
+            let mut state = self.state.borrow_mut();
+            state.instructions = [0; 32];
+            state.fdebug = 0;
+            state.tx_stall = 0;
+            state.rx_stall = 0;
+            state.irq = 0;
+            state.pin_values = 0;
+            state.pin_directions = 0;
+            state.old_pin_values = 0;
+            state.old_pin_directions = 0;
+            state.irq0_int_enable = 0;
+            state.irq0_int_force = 0;
+            state.irq1_int_enable = 0;
+            state.irq1_int_force = 0;
+            state.machines = [
+                StateMachine::new(),
+                StateMachine::new(),
+                StateMachine::new(),
+                StateMachine::new(),
+            ];
+        }
+        if let Some(board) = self.board() {
+            let board = board.borrow();
+            board.core.set_interrupt(self.first_irq, false);
+            board.core.set_interrupt(self.first_irq + 1, false);
+            for pin in &board.gpio {
+                pin.set_output(false, false);
+            }
         }
     }
 
     fn run_burst(&self) {
         for _ in 0..1000 {
             self.step();
+        }
+        {
+            let state = self.state.borrow();
+            self.update_dreqs(&state);
         }
         let running = self
             .state
