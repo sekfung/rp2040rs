@@ -873,6 +873,33 @@ impl Core {
             }
         } else if opcode == 0b1011_1111_0000_0000 {
             // NOP
+        } else if opcode >> 6 == 0b1011101000 {
+            // REV
+            let rm = ((opcode >> 3) & 0x7) as usize;
+            let rd = (opcode & 0x7) as usize;
+            let input = self.reg(rm);
+            let result = ((input & 0xff) << 24)
+                | (((input >> 8) & 0xff) << 16)
+                | (((input >> 16) & 0xff) << 8)
+                | ((input >> 24) & 0xff);
+            self.set_reg(rd, result);
+        } else if opcode >> 6 == 0b1011101001 {
+            // REV16
+            let rm = ((opcode >> 3) & 0x7) as usize;
+            let rd = (opcode & 0x7) as usize;
+            let input = self.reg(rm);
+            let result = (((input >> 16) & 0xff) << 24)
+                | (((input >> 24) & 0xff) << 16)
+                | ((input & 0xff) << 8)
+                | ((input >> 8) & 0xff);
+            self.set_reg(rd, result);
+        } else if opcode >> 6 == 0b1011101011 {
+            // REVSH
+            let rm = ((opcode >> 3) & 0x7) as usize;
+            let rd = (opcode & 0x7) as usize;
+            let input = self.reg(rm);
+            let result = sign_extend_16(((input & 0xff) << 8) | ((input >> 8) & 0xff));
+            self.set_reg(rd, result);
         } else if opcode >> 6 == 0b0100000111 {
             // ROR
             let rm = ((opcode >> 3) & 0x7) as usize;
@@ -1461,7 +1488,12 @@ mod tests {
     use crate::utils::assembler::{
         opcode_adcs, opcode_add_reg, opcode_add_sp2, opcode_add_sp_plus_imm, opcode_adds1,
         opcode_adds2, opcode_adds_reg, opcode_adr, opcode_ands, opcode_asrs, opcode_asrs_reg,
-        opcode_bics, opcode_nop,
+        opcode_bics, opcode_lsls_imm, opcode_lsls_reg, opcode_lsrs, opcode_lsrs_reg, opcode_mov,
+        opcode_movs, opcode_movs_reg, opcode_nop, opcode_rev, opcode_rev16, opcode_revsh,
+        opcode_ror, opcode_rsbs, opcode_sbcs, opcode_stmia, opcode_str, opcode_str_reg,
+        opcode_str_sp, opcode_strb, opcode_strb_reg, opcode_strh, opcode_strh_reg, opcode_sub_sp,
+        opcode_subs1, opcode_subs2, opcode_subs_reg, opcode_svc, opcode_sxtb, opcode_sxth,
+        opcode_tst, opcode_udf2, opcode_uxtb, opcode_uxth, opcode_wfi, opcode_yield,
     };
 
     fn driver() -> TestDriver {
@@ -1794,8 +1826,8 @@ mod tests {
         opcode_cmp_reg_t1, opcode_cmp_reg_t2, opcode_dmbsy, opcode_dsbsy, opcode_eors,
         opcode_isbsy, opcode_ldmia, opcode_ldr_imm, opcode_ldr_lit, opcode_ldr_reg, opcode_ldr_sp,
         opcode_ldrb, opcode_ldrb_reg, opcode_ldrh, opcode_ldrh_reg, opcode_ldrsb, opcode_ldrsh,
-        opcode_lsls_imm, opcode_mov, opcode_movs, opcode_mrs, opcode_msr, opcode_muls, opcode_mvns,
-        opcode_orrs, opcode_pop, opcode_push, opcode_udf, opcode_udf2,
+        opcode_mrs, opcode_msr, opcode_muls, opcode_mvns, opcode_orrs, opcode_pop, opcode_push,
+        opcode_udf,
     };
 
     fn run16_at(pc: u32, opcode: u16) -> Registers {
@@ -2342,5 +2374,502 @@ mod tests {
         let r = cpu.read_registers();
         assert_eq!(r.r5, 0x1234_5678u32.wrapping_shl(18));
         assert_eq!(r.pc, 0x2000_0002);
+    }
+
+    #[test]
+    fn should_execute_lsls_reg_r5_r0() {
+        let cpu = driver();
+        cpu.set_registers(&[(5, 0b11), (0, 0xff00_3302)]);
+        cpu.write_u16(0x2000_0000, opcode_lsls_reg(5, 0));
+        cpu.single_step();
+        let r = cpu.read_registers();
+        assert_eq!(r.r5, 0b1100);
+        assert!(!r.c);
+    }
+
+    #[test]
+    fn should_execute_lsls_reg_when_shift_over_31() {
+        let cpu = driver();
+        cpu.set_registers(&[(3, 1), (4, 0x20)]);
+        cpu.write_u16(0x2000_0000, opcode_lsls_reg(3, 4));
+        cpu.single_step();
+        let r = cpu.read_registers();
+        assert_eq!(r.r3, 0);
+        assert!(!r.n);
+        assert!(r.c);
+        assert!(r.z);
+    }
+
+    #[test]
+    fn should_execute_lsls_immediate_with_carry() {
+        let cpu = driver();
+        cpu.set_registers(&[(5, 0x0000_4001)]);
+        cpu.write_u16(0x2000_0000, opcode_lsls_imm(5, 5, 18));
+        cpu.single_step();
+        let r = cpu.read_registers();
+        assert_eq!(r.r5, 0x0004_0000);
+        assert!(r.c);
+    }
+
+    #[test]
+    fn should_execute_lsrs_reg_r5_r0() {
+        let cpu = driver();
+        cpu.set_registers(&[(5, 0xff00_000f), (0, 0xff00_3302)]);
+        cpu.write_u16(0x2000_0000, opcode_lsrs_reg(5, 0));
+        cpu.single_step();
+        let r = cpu.read_registers();
+        assert_eq!(r.r5, 0x3fc0_0003);
+        assert!(r.c);
+    }
+
+    #[test]
+    fn should_return_zero_for_lsrs_with_32_bit_shift() {
+        let cpu = driver();
+        cpu.set_registers(&[(2, 10), (3, 32)]);
+        cpu.write_u16(0x2000_0000, opcode_lsrs_reg(2, 3));
+        cpu.single_step();
+        let r = cpu.read_registers();
+        assert_eq!(r.r2, 0);
+        assert!(r.z);
+        assert!(!r.c);
+    }
+
+    #[test]
+    fn should_execute_lsrs_immediate_by_one() {
+        let cpu = driver();
+        cpu.set_registers(&[(1, 0b10)]);
+        cpu.write_u16(0x2000_0000, opcode_lsrs(1, 1, 1));
+        cpu.single_step();
+        let r = cpu.read_registers();
+        assert_eq!(r.r1, 1);
+        assert!(!r.c);
+    }
+
+    #[test]
+    fn should_execute_lsrs_immediate_by_zero() {
+        let cpu = driver();
+        cpu.set_registers(&[(1, 0xffff_ffff)]);
+        cpu.write_u16(0x2000_0000, opcode_lsrs(1, 1, 0));
+        cpu.single_step();
+        let r = cpu.read_registers();
+        assert_eq!(r.r1, 0);
+        assert!(r.c);
+    }
+
+    #[test]
+    fn should_mask_low_sp_bits_on_mov_sp_r5() {
+        let cpu = driver();
+        cpu.set_registers(&[(5, 0x53)]);
+        cpu.write_u16(0x2000_0000, opcode_mov(13, 5));
+        cpu.single_step();
+        assert_eq!(cpu.read_registers().sp, 0x50);
+    }
+
+    #[test]
+    fn should_mask_low_pc_bit_on_mov_pc_r5() {
+        let cpu = driver();
+        cpu.set_registers(&[(5, 0x53)]);
+        cpu.write_u16(0x2000_0000, opcode_mov(15, 5));
+        cpu.single_step();
+        assert_eq!(cpu.read_registers().pc, 0x52);
+    }
+
+    #[test]
+    fn should_execute_movs_reg_r6_r5() {
+        let cpu = driver();
+        cpu.set_registers(&[(5, 0x50)]);
+        cpu.write_u16(0x2000_0000, opcode_movs_reg(6, 5));
+        cpu.single_step();
+        assert_eq!(cpu.read_registers().r6, 0x50);
+    }
+
+    #[test]
+    fn should_execute_rsbs_r0_r3() {
+        let cpu = driver();
+        cpu.set_registers(&[(3, 100)]);
+        cpu.write_u16(0x2000_0000, opcode_rsbs(0, 3));
+        cpu.single_step();
+        let r = cpu.read_registers();
+        assert_eq!(r.r0 as i32, -100);
+        assert!(r.n);
+        assert!(!r.z);
+        assert!(!r.c);
+        assert!(!r.v);
+    }
+
+    #[test]
+    fn should_execute_rev() {
+        let cpu = driver();
+        cpu.set_registers(&[(3, 0x1122_3344)]);
+        cpu.write_u16(0x2000_0000, opcode_rev(2, 3));
+        cpu.single_step();
+        assert_eq!(cpu.read_registers().r2, 0x4433_2211);
+    }
+
+    #[test]
+    fn should_execute_rev16() {
+        let cpu = driver();
+        cpu.set_registers(&[(5, 0x1122_3344)]);
+        cpu.write_u16(0x2000_0000, opcode_rev16(0, 5));
+        cpu.single_step();
+        assert_eq!(cpu.read_registers().r0, 0x2211_4433);
+    }
+
+    #[test]
+    fn should_execute_revsh() {
+        let cpu = driver();
+        cpu.set_registers(&[(2, 0xeeaa_55f0)]);
+        cpu.write_u16(0x2000_0000, opcode_revsh(1, 2));
+        cpu.single_step();
+        assert_eq!(cpu.read_registers().r1, 0xffff_f055);
+    }
+
+    #[test]
+    fn should_execute_ror() {
+        let cpu = driver();
+        cpu.set_registers(&[(5, 0x1234_5678), (3, 0x2004)]);
+        cpu.write_u16(0x2000_0000, opcode_ror(5, 3));
+        cpu.single_step();
+        let r = cpu.read_registers();
+        assert_eq!(r.r5, 0x8123_4567);
+        assert!(r.n);
+        assert!(!r.z);
+        assert!(r.c);
+    }
+
+    #[test]
+    fn should_execute_ror_when_shift_over_32() {
+        let cpu = driver();
+        cpu.set_registers(&[(5, 0x1234_5678), (3, 0x2044)]);
+        cpu.write_u16(0x2000_0000, opcode_ror(5, 3));
+        cpu.single_step();
+        let r = cpu.read_registers();
+        assert_eq!(r.r5, 0x8123_4567);
+        assert!(r.n);
+        assert!(!r.z);
+        assert!(r.c);
+    }
+
+    #[test]
+    fn should_execute_rsbs_zero() {
+        let cpu = driver();
+        cpu.set_registers(&[(3, 0)]);
+        cpu.write_u16(0x2000_0000, opcode_rsbs(0, 3));
+        cpu.single_step();
+        let r = cpu.read_registers();
+        assert_eq!(r.r0, 0);
+        assert!(!r.n);
+        assert!(r.z);
+        assert!(r.c);
+        assert!(!r.v);
+    }
+
+    #[test]
+    fn should_execute_sbcs_with_borrow() {
+        let cpu = driver();
+        cpu.set_registers(&[(0, 100), (3, 55)]);
+        cpu.set_c(false);
+        cpu.write_u16(0x2000_0000, opcode_sbcs(0, 3));
+        cpu.single_step();
+        let r = cpu.read_registers();
+        assert_eq!(r.r0, 44);
+        assert!(!r.n);
+        assert!(!r.z);
+        assert!(r.c);
+        assert!(!r.v);
+    }
+
+    #[test]
+    fn should_execute_sbcs_zero_result() {
+        let cpu = driver();
+        cpu.set_registers(&[(0, 0), (3, 0xffff_ffff)]);
+        cpu.set_c(false);
+        cpu.write_u16(0x2000_0000, opcode_sbcs(0, 3));
+        cpu.single_step();
+        let r = cpu.read_registers();
+        assert_eq!(r.r0, 0);
+        assert!(r.z);
+        assert!(!r.c);
+    }
+
+    #[test]
+    fn should_execute_stmia() {
+        let cpu = driver();
+        cpu.set_registers(&[(0, 0x2000_0010), (1, 0xf00d_f00d), (2, 0x4242)]);
+        cpu.write_u16(0x2000_0000, opcode_stmia(0, (1 << 1) | (1 << 2)));
+        cpu.single_step();
+        assert_eq!(cpu.read_registers().r0, 0x2000_0018);
+        assert_eq!(cpu.read_u32(0x2000_0010), 0xf00d_f00d);
+        assert_eq!(cpu.read_u32(0x2000_0014), 0x4242);
+    }
+
+    #[test]
+    fn should_execute_str_immediate() {
+        let cpu = driver();
+        cpu.set_registers(&[(4, 0x2000_0020), (6, 0xf00d)]);
+        cpu.write_u16(0x2000_0000, opcode_str(6, 4, 20));
+        cpu.single_step();
+        assert_eq!(cpu.read_u32(0x2000_0034), 0xf00d);
+    }
+
+    #[test]
+    fn should_execute_str_register() {
+        let cpu = driver();
+        cpu.set_registers(&[(4, 0x2000_0020), (5, 20), (6, 0xf00d)]);
+        cpu.write_u16(0x2000_0000, opcode_str_reg(6, 4, 5));
+        cpu.single_step();
+        assert_eq!(cpu.read_u32(0x2000_0034), 0xf00d);
+    }
+
+    #[test]
+    fn should_execute_str_sp_relative() {
+        let cpu = driver();
+        cpu.set_registers(&[(3, 0xaa55), (13, 0x2000_0000)]);
+        cpu.write_u16(0x2000_0000, opcode_str_sp(3, 12));
+        cpu.single_step();
+        assert_eq!(cpu.read_u8(0x2000_000c), 0x55);
+        assert_eq!(cpu.read_u8(0x2000_000d), 0xaa);
+    }
+
+    #[test]
+    fn should_execute_str_register_with_wrapping_address() {
+        let cpu = driver();
+        cpu.set_registers(&[(1, 0xffff_fffc), (3, 0x2004_1e50), (2, 0x0420_1337)]);
+        cpu.write_u16(0x2000_0000, opcode_str_reg(2, 1, 3));
+        cpu.single_step();
+        assert_eq!(cpu.read_u32(0x2004_1e4c), 0x0420_1337);
+    }
+
+    #[test]
+    fn should_execute_strb_immediate() {
+        let cpu = driver();
+        cpu.write_u32(0x2000_0020, 0xf5f4_f3f2);
+        cpu.set_registers(&[(4, 0x2000_0020), (6, 0xf055)]);
+        cpu.write_u16(0x2000_0000, opcode_strb(6, 4, 1));
+        cpu.single_step();
+        assert_eq!(cpu.read_u32(0x2000_0020), 0xf5f4_55f2);
+    }
+
+    #[test]
+    fn should_execute_strb_register() {
+        let cpu = driver();
+        cpu.write_u32(0x2000_0020, 0xf5f4_f3f2);
+        cpu.set_registers(&[(4, 0x2000_0020), (5, 1), (6, 0xf055)]);
+        cpu.write_u16(0x2000_0000, opcode_strb_reg(6, 4, 5));
+        cpu.single_step();
+        assert_eq!(cpu.read_u32(0x2000_0020), 0xf5f4_55f2);
+    }
+
+    #[test]
+    fn should_execute_strh_immediate() {
+        let cpu = driver();
+        cpu.write_u32(0x2000_0020, 0xf5f4_f3f2);
+        cpu.set_registers(&[(4, 0x2000_0020), (6, 0x6655)]);
+        cpu.write_u16(0x2000_0000, opcode_strh(6, 4, 2));
+        cpu.single_step();
+        assert_eq!(cpu.read_u32(0x2000_0020), 0x6655_f3f2);
+    }
+
+    #[test]
+    fn should_execute_strh_register() {
+        let cpu = driver();
+        cpu.write_u32(0x2000_0020, 0xf5f4_f3f2);
+        cpu.set_registers(&[(4, 0x2000_0020), (1, 2), (6, 0x6655)]);
+        cpu.write_u16(0x2000_0000, opcode_strh_reg(6, 4, 1));
+        cpu.single_step();
+        assert_eq!(cpu.read_u32(0x2000_0020), 0x6655_f3f2);
+    }
+
+    #[test]
+    fn should_execute_sub_sp_immediate() {
+        let cpu = driver();
+        cpu.set_registers(&[(13, 0x1000_0040)]);
+        cpu.write_u16(0x2000_0000, opcode_sub_sp(0x10));
+        cpu.single_step();
+        assert_eq!(cpu.read_registers().sp, 0x1000_0030);
+    }
+
+    #[test]
+    fn should_execute_subs_immediate_with_overflow() {
+        let cpu = driver();
+        cpu.set_registers(&[(1, 0x8000_0000)]);
+        cpu.write_u16(0x2000_0000, opcode_subs2(1, 1));
+        cpu.single_step();
+        let r = cpu.read_registers();
+        assert_eq!(r.r1, 0x7fff_ffff);
+        assert!(!r.n);
+        assert!(!r.z);
+        assert!(r.c);
+        assert!(r.v);
+    }
+
+    #[test]
+    fn should_execute_subs_r5_r3_5() {
+        let cpu = driver();
+        cpu.set_registers(&[(3, 0)]);
+        cpu.write_u16(0x2000_0000, opcode_subs1(5, 3, 5));
+        cpu.single_step();
+        let r = cpu.read_registers();
+        assert_eq!(r.r5 as i32, -5);
+        assert!(r.n);
+        assert!(!r.z);
+        assert!(!r.c);
+        assert!(!r.v);
+    }
+
+    #[test]
+    fn should_execute_subs_register() {
+        let cpu = driver();
+        cpu.set_registers(&[(3, 6), (2, 5)]);
+        cpu.write_u16(0x2000_0000, opcode_subs_reg(5, 3, 2));
+        cpu.single_step();
+        let r = cpu.read_registers();
+        assert_eq!(r.r5, 1);
+        assert!(!r.n);
+        assert!(!r.z);
+        assert!(r.c);
+        assert!(!r.v);
+    }
+
+    #[test]
+    fn should_execute_subs_register_with_borrow() {
+        let cpu = driver();
+        cpu.set_registers(&[(2, 8), (3, 0xffff_ffff)]);
+        cpu.write_u16(0x2000_0000, opcode_subs_reg(3, 3, 2));
+        cpu.single_step();
+        let r = cpu.read_registers();
+        assert_eq!(r.r3, 0xffff_fff7);
+        assert!(r.n);
+        assert!(!r.z);
+        assert!(r.c);
+        assert!(!r.v);
+    }
+
+    #[test]
+    fn should_execute_subs_register_nv_flags() {
+        let cpu = driver();
+        cpu.set_registers(&[(3, 0), (2, 0x8000_0000)]);
+        cpu.write_u16(0x2000_0000, opcode_subs_reg(5, 3, 2));
+        cpu.single_step();
+        let r = cpu.read_registers();
+        assert_eq!(r.r5, 0x8000_0000);
+        assert!(r.n);
+        assert!(!r.z);
+        assert!(!r.c);
+        assert!(r.v);
+    }
+
+    #[test]
+    fn should_execute_subs_register_zc_flags() {
+        let cpu = driver();
+        cpu.set_registers(&[(2, 0x8000_0000), (3, 0x8000_0000)]);
+        cpu.write_u16(0x2000_0000, opcode_subs_reg(5, 3, 2));
+        cpu.single_step();
+        let r = cpu.read_registers();
+        assert_eq!(r.r5, 0);
+        assert!(!r.n);
+        assert!(r.z);
+        assert!(r.c);
+        assert!(!r.v);
+    }
+
+    #[test]
+    fn should_raise_svc_exception() {
+        let cpu = driver();
+        let rp = &cpu.rp2040;
+        rp.core.set_sp(0x2000_4000);
+        rp.core.set_pc(0x2000_4000);
+        rp.write_u16(0x2000_4000, opcode_svc(10));
+        rp.core.set_reg(0, 0x44);
+        rp.write_u32(0xe000_ed08, 0x2004_0000);
+        rp.write_u32(0x2004_0000 + 11 * 4, 0x2000_2000);
+        rp.write_u16(0x2000_2000, opcode_movs(0, 0x55));
+
+        cpu.single_step();
+        assert!(rp.core.pending_svc());
+        cpu.single_step();
+        let r = cpu.read_registers();
+        assert!(!rp.core.pending_svc());
+        assert_eq!(r.pc, 0x2000_2002);
+        assert_eq!(r.r0, 0x55);
+    }
+
+    #[test]
+    fn should_execute_sxtb_with_sign_bit_one() {
+        let cpu = driver();
+        cpu.set_registers(&[(2, 0x2244_6688)]);
+        cpu.write_u16(0x2000_0000, opcode_sxtb(2, 2));
+        cpu.single_step();
+        assert_eq!(cpu.read_registers().r2, 0xffff_ff88);
+    }
+
+    #[test]
+    fn should_execute_sxtb_with_sign_bit_zero() {
+        let cpu = driver();
+        cpu.set_registers(&[(2, 0x1234_5678)]);
+        cpu.write_u16(0x2000_0000, opcode_sxtb(2, 2));
+        cpu.single_step();
+        assert_eq!(cpu.read_registers().r2, 0x78);
+    }
+
+    #[test]
+    fn should_execute_sxth_with_sign_bit_one() {
+        let cpu = driver();
+        cpu.set_registers(&[(5, 0x2244_8765)]);
+        cpu.write_u16(0x2000_0000, opcode_sxth(2, 5));
+        cpu.single_step();
+        assert_eq!(cpu.read_registers().r2, 0xffff_8765);
+    }
+
+    #[test]
+    fn should_execute_tst_negative() {
+        let cpu = driver();
+        cpu.set_registers(&[(1, 0xf000_0000), (3, 0xf000_4000)]);
+        cpu.write_u16(0x2000_0000, opcode_tst(1, 3));
+        cpu.single_step();
+        assert!(cpu.read_registers().n);
+    }
+
+    #[test]
+    fn should_execute_tst_zero() {
+        let cpu = driver();
+        cpu.set_registers(&[(1, 0xf0), (3, 0x0f)]);
+        cpu.write_u16(0x2000_0000, opcode_tst(1, 3));
+        cpu.single_step();
+        assert!(cpu.read_registers().z);
+    }
+
+    #[test]
+    fn should_execute_uxtb() {
+        let cpu = driver();
+        cpu.set_registers(&[(3, 0x1234_5678)]);
+        cpu.write_u16(0x2000_0000, opcode_uxtb(5, 3));
+        cpu.single_step();
+        assert_eq!(cpu.read_registers().r5, 0x78);
+    }
+
+    #[test]
+    fn should_execute_uxth() {
+        let cpu = driver();
+        cpu.set_registers(&[(1, 0x1234_5678)]);
+        cpu.write_u16(0x2000_0000, opcode_uxth(3, 1));
+        cpu.single_step();
+        assert_eq!(cpu.read_registers().r3, 0x5678);
+    }
+
+    #[test]
+    fn should_execute_wfi() {
+        let cpu = driver();
+        cpu.write_u16(0x2000_0000, opcode_wfi());
+        cpu.single_step();
+        assert_eq!(cpu.read_registers().pc, 0x2000_0002);
+    }
+
+    #[test]
+    fn should_execute_yield() {
+        let cpu = driver();
+        cpu.write_u16(0x2000_0000, opcode_yield());
+        cpu.single_step();
+        assert_eq!(cpu.read_registers().pc, 0x2000_0002);
     }
 }
