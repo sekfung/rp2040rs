@@ -221,6 +221,7 @@ impl I2c {
         if empty || busy || blocked || !enabled {
             return;
         }
+        self.state.borrow_mut().busy = true;
         if (idle || restart) && !self.state.borrow().pending_restart {
             let mut state = self.state.borrow_mut();
             state.pending_restart = true;
@@ -332,28 +333,33 @@ impl I2c {
     }
 
     fn complete_stop(&self) {
-        {
+        let was_abort = {
             let mut state = self.state.borrow_mut();
             state.state = I2cState::Idle;
             state.busy = false;
             state.pending_restart = false;
+            let was_abort = state.enable & ABORT != 0;
             if state.enable & ABORT != 0 {
                 state.enable &= !ABORT;
             }
-        }
+            was_abort
+        };
         let mut callback = self.state.borrow_mut().on_stop.take();
         if let Some(callback) = callback.as_mut() {
             callback();
         }
         self.state.borrow_mut().on_stop = callback;
         self.set_interrupts(R_STOP_DET);
-        self.next_command();
+        if !was_abort {
+            self.next_command();
+        }
     }
 
     fn abort(&self, reason: u32) {
         {
             let mut state = self.state.borrow_mut();
-            state.abort_source = reason | ((state.tx_fifo.item_count() as u32) << 23);
+            state.abort_source &= 1 << 9;
+            state.abort_source |= reason | ((state.tx_fifo.item_count() as u32) << 23);
             state.tx_fifo.reset();
         }
         self.set_interrupts(R_TX_ABRT);
@@ -371,15 +377,19 @@ impl Peripheral for I2c {
             IC_TAR => self.state.borrow().target_address,
             IC_SAR => self.state.borrow().slave_address,
             IC_DATA_CMD => {
-                let mut state = self.state.borrow_mut();
-                if state.rx_fifo.empty() {
-                    state.int_raw |= R_RX_UNDER;
-                    0
-                } else {
-                    let value = state.rx_fifo.pull();
-                    state.int_raw &= !R_RX_FULL;
-                    value
-                }
+                let value = {
+                    let mut state = self.state.borrow_mut();
+                    if state.rx_fifo.empty() {
+                        state.int_raw |= R_RX_UNDER;
+                        0
+                    } else {
+                        let value = state.rx_fifo.pull();
+                        state.int_raw &= !R_RX_FULL;
+                        value
+                    }
+                };
+                self.check_interrupts();
+                value
             }
             IC_SS_SCL_HCNT => self.state.borrow().ss_clock_high,
             IC_SS_SCL_LCNT => self.state.borrow().ss_clock_low,
@@ -392,7 +402,7 @@ impl Peripheral for I2c {
             IC_TX_TL => self.state.borrow().tx_threshold,
             IC_CLR_INTR => {
                 self.state.borrow_mut().abort_source &= 1 << 9;
-                self.clear_interrupts(0x1fff)
+                self.clear_interrupts(0xfff)
             }
             IC_ENABLE => self.state.borrow().enable,
             IC_STATUS => {
@@ -455,21 +465,31 @@ impl Peripheral for I2c {
             IC_RX_TL => self.state.borrow_mut().rx_threshold = (value & 0xff).min(16),
             IC_TX_TL => self.state.borrow_mut().tx_threshold = (value & 0xff).min(16),
             IC_ENABLE => {
-                let mut state = self.state.borrow_mut();
-                let mut value = value | (state.enable & ABORT);
+                let (mut value, idle) = {
+                    let state = self.state.borrow();
+                    (
+                        value | (state.enable & ABORT),
+                        state.state == I2cState::Idle,
+                    )
+                };
                 if value & ABORT != 0 {
-                    if state.state == I2cState::Idle {
+                    if idle {
                         value &= !ABORT;
                     } else {
-                        state.stop = true;
+                        self.abort(1 << 16);
                     }
                 }
-                if value & ENABLE == 0 {
-                    state.tx_fifo.reset();
-                    state.rx_fifo.reset();
+                {
+                    let mut state = self.state.borrow_mut();
+                    if value & ABORT != 0 && !idle {
+                        state.stop = true;
+                    }
+                    if value & ENABLE == 0 {
+                        state.tx_fifo.reset();
+                        state.rx_fifo.reset();
+                    }
+                    state.enable = value;
                 }
-                state.enable = value;
-                drop(state);
                 self.next_command();
             }
             IC_FS_SPKLEN if value > 0 => self.state.borrow_mut().spike_len = value,

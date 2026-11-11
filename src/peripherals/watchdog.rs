@@ -120,7 +120,7 @@ impl Peripheral for Watchdog {
                 } else {
                     state.counter & TIME_MASK
                 };
-                (u32::from(state.enable) * ENABLE)
+                (u32::from(state.enable && state.tick_enable) * ENABLE)
                     | (u32::from(state.pause_dbg0) * PAUSE_DBG0)
                     | (u32::from(state.pause_dbg1) * PAUSE_DBG1)
                     | (u32::from(state.pause_jtag) * PAUSE_JTAG)
@@ -148,18 +148,28 @@ impl Peripheral for Watchdog {
         };
         match offset {
             CTRL => {
-                let mut state = self.state.borrow_mut();
-                if value & TRIGGER != 0 {
-                    state.reason = REASON_FORCE;
-                    if let Some(callback) = state.on_trigger.as_mut() {
-                        callback();
+                let trigger_callback = {
+                    let mut state = self.state.borrow_mut();
+                    if value & TRIGGER != 0 {
+                        state.reason = REASON_FORCE;
+                    }
+                    state.enable = value & ENABLE != 0;
+                    state.pause_dbg0 = value & PAUSE_DBG0 != 0;
+                    state.pause_dbg1 = value & PAUSE_DBG1 != 0;
+                    state.pause_jtag = value & PAUSE_JTAG != 0;
+                    if value & TRIGGER != 0 {
+                        state.on_trigger.take()
+                    } else {
+                        None
+                    }
+                };
+                if let Some(mut callback) = trigger_callback {
+                    callback();
+                    let mut state = self.state.borrow_mut();
+                    if state.on_trigger.is_none() {
+                        state.on_trigger = Some(callback);
                     }
                 }
-                state.enable = value & ENABLE != 0;
-                state.pause_dbg0 = value & PAUSE_DBG0 != 0;
-                state.pause_dbg1 = value & PAUSE_DBG1 != 0;
-                state.pause_jtag = value & PAUSE_JTAG != 0;
-                drop(state);
                 self.arm();
             }
             LOAD => {

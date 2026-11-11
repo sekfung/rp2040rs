@@ -201,7 +201,14 @@ impl Peripheral for Spi {
         };
         match offset {
             SSPCR0 => self.state.borrow_mut().control0 = value,
-            SSPCR1 => self.state.borrow_mut().control1 = value,
+            SSPCR1 => {
+                let was_enabled = self.state.borrow().control1 & 2 != 0;
+                self.state.borrow_mut().control1 = value;
+                if !was_enabled && value & 2 != 0 {
+                    self.do_tx();
+                    self.fifos_updated();
+                }
+            }
             SSPDR => {
                 let bits = self.data_bits();
                 let value = value & ((1u32 << bits) - 1);

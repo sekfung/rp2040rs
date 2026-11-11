@@ -1,3 +1,4 @@
+use rp2040rs::peripherals::Peripheral;
 use rp2040rs::rp2040::Rp2040;
 use std::cell::Cell;
 use std::rc::Rc;
@@ -14,6 +15,9 @@ const PADS_QSPI: u32 = 0x4002_0000;
 const BUSCTRL: u32 = 0x4003_0000;
 const TBMAN: u32 = 0x4006_c000;
 const SIO: u32 = 0xd000_0000;
+const SPI0: u32 = 0x4003_c000;
+const I2C0: u32 = 0x4004_4000;
+const WATCHDOG: u32 = 0x4005_8000;
 
 #[test]
 fn sysinfo_and_tbman_identity_registers_are_implemented() {
@@ -78,6 +82,45 @@ fn sio_interpolator_registers_are_wired() {
 }
 
 #[test]
+fn spi_enabling_sse_kicks_queued_transmit() {
+    let rp = Rp2040::new();
+    rp.spi[0].set_on_transmit(Box::new(|byte| byte.wrapping_add(1)));
+    rp.write_u32(SPI0, 7); // 8-bit data
+    rp.write_u32(SPI0 + 0x04, 0); // SSE disabled
+    rp.write_u32(SPI0 + 0x08, 0x41);
+    assert_eq!(rp.read_u32(SPI0 + 0x08), 0);
+    rp.write_u32(SPI0 + 0x04, 2); // enable SSE
+    assert_eq!(rp.read_u32(SPI0 + 0x08), 0x42);
+}
+
+#[test]
+fn watchdog_trigger_callback_can_read_registers() {
+    let rp = Rp2040::new();
+    let rp2 = rp.clone();
+    rp.watchdog.set_on_watchdog_trigger(Box::new(move || {
+        let _ = rp2.read_u32(WATCHDOG + 0x04);
+    }));
+    rp.write_u32(WATCHDOG, (1 << 31) | (1 << 30));
+    assert_eq!(rp.read_u32(WATCHDOG + 0x08), 2); // REASON_FORCE
+}
+
+#[test]
+fn i2c_user_abort_raises_tx_abrt_and_stops_command_chain() {
+    let rp = Rp2040::new();
+    let i2c = rp.i2c[0].clone();
+    let i2c2 = i2c.clone();
+    i2c.set_on_start(Box::new(move || {
+        i2c2.write_u32_atomic(0x6c, 2, 0); // IC_ENABLE.ABORT
+    }));
+    rp.write_u32(I2C0 + 0x6c, 1); // enable
+    rp.write_u32(I2C0 + 0x04, 0x55); // target
+    rp.write_u32(I2C0 + 0x10, 0x100 | 0x200); // read + STOP
+    assert_ne!(rp.read_u32(I2C0 + 0x34) & (1 << 6), 0); // TX_ABRT
+    assert_ne!(rp.read_u32(I2C0 + 0x80) & (1 << 16), 0); // ABRT_USER_ABRT
+    assert_eq!(rp.read_u32(I2C0 + 0x78), 0); // RXFLR
+}
+
+#[test]
 fn new_peripherals_honor_atomic_aliases() {
     let rp = Rp2040::new();
 
@@ -127,11 +170,8 @@ fn gpio_values_respect_pad_input_enable() {
 }
 
 const ADC: u32 = 0x4004_c000;
-const SPI0: u32 = 0x4003_c000;
-const I2C0: u32 = 0x4004_4000;
 const SSI: u32 = 0x1800_0000;
 const RTC: u32 = 0x4005_c000;
-const WATCHDOG: u32 = 0x4005_8000;
 
 const ADC_CS: u32 = ADC;
 const ADC_FCS: u32 = ADC + 0x08;
