@@ -256,7 +256,7 @@ impl Pio {
         let board = board.borrow();
         let mut value = 0;
         for (index, pin) in board.gpio.iter().enumerate() {
-            if pin.input_value() {
+            if pin.raw_input_value() {
                 value |= 1 << index;
             }
         }
@@ -271,7 +271,7 @@ impl Pio {
         borrowed
             .gpio
             .get(pin as usize)
-            .is_some_and(|pin| pin.input_value())
+            .is_some_and(|pin| pin.raw_input_value())
     }
 
     fn update_interrupts(&self, state: &PioState) {

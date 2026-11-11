@@ -5,12 +5,20 @@ use std::rc::Rc;
 use crate::clock::{Clock, SimulationClock};
 use crate::cortex_m0_core::Core;
 use crate::gpio_pin::GpioPin;
+use crate::peripherals::busctrl::BusCtrl;
 use crate::peripherals::clocks::Clocks;
 use crate::peripherals::dma::Dma;
+use crate::peripherals::io::Io;
+use crate::peripherals::pads::Pads;
 use crate::peripherals::pio::Pio;
 use crate::peripherals::pll::Pll;
 use crate::peripherals::ppb::Ppb;
+use crate::peripherals::psm::Psm;
 use crate::peripherals::pwm::Pwm;
+use crate::peripherals::reset::Resets;
+use crate::peripherals::syscfg::SysCfg;
+use crate::peripherals::sysinfo::SysInfo;
+use crate::peripherals::tbman::Tbman;
 use crate::peripherals::timer::Timer;
 use crate::peripherals::uart::Uart;
 use crate::peripherals::usb::UsbController;
@@ -141,6 +149,15 @@ pub struct BoardShared {
     pub dma: Option<Dma>,
     pub pio: [Option<Pio>; 2],
     pub usb_ctrl: Option<UsbController>,
+    pub sysinfo: Option<SysInfo>,
+    pub syscfg: Option<SysCfg>,
+    pub busctrl: Option<BusCtrl>,
+    pub tbman: Option<Tbman>,
+    pub resets: Option<Resets>,
+    pub psm: Option<Psm>,
+    pub io: Option<Io>,
+    pub pads_bank0: Option<Pads>,
+    pub pads_qspi: Option<Pads>,
     pub gpio: [GpioPin; 30],
     pub qspi: [GpioPin; 6],
 }
@@ -166,6 +183,15 @@ pub struct Rp2040 {
     pub dma: Dma,
     pub pio: [Pio; 2],
     pub usb_ctrl: UsbController,
+    pub sysinfo: SysInfo,
+    pub syscfg: SysCfg,
+    pub busctrl: BusCtrl,
+    pub tbman: Tbman,
+    pub resets: Resets,
+    pub psm: Psm,
+    pub io: Io,
+    pub pads_bank0: Pads,
+    pub pads_qspi: Pads,
     pub gpio: [GpioPin; 30],
     pub qspi: [GpioPin; 6],
 }
@@ -214,6 +240,15 @@ impl Rp2040 {
                 dma: None,
                 pio: [None, None],
                 usb_ctrl: None,
+                sysinfo: None,
+                syscfg: None,
+                busctrl: None,
+                tbman: None,
+                resets: None,
+                psm: None,
+                io: None,
+                pads_bank0: None,
+                pads_qspi: None,
                 gpio: gpio.clone(),
                 qspi: qspi.clone(),
             })
@@ -236,6 +271,15 @@ impl Rp2040 {
         let pio0 = Pio::new("PIO0", crate::irq::Irq::Pio0Irq0 as u32, 0, weak.clone());
         let pio1 = Pio::new("PIO1", crate::irq::Irq::Pio1Irq0 as u32, 1, weak.clone());
         let usb_ctrl = UsbController::new("USB", weak.clone());
+        let sysinfo = SysInfo::new("SYSINFO_BASE", weak.clone());
+        let syscfg = SysCfg::new("SYSCFG", core.clone(), weak.clone());
+        let busctrl = BusCtrl::new("BUSCTRL_BASE", weak.clone());
+        let tbman = Tbman::new("TBMAN_BASE", weak.clone());
+        let resets = Resets::new("RESETS_BASE", weak.clone());
+        let psm = Psm::new("PSM_BASE", weak.clone());
+        let io = Io::new("IO_BANK0_BASE", gpio.to_vec(), core.clone(), weak.clone());
+        let pads_bank0 = Pads::new("PADS_BANK0_BASE", gpio.to_vec(), false, weak.clone());
+        let pads_qspi = Pads::new("PADS_QSPI_BASE", qspi.to_vec(), true, weak.clone());
         {
             let mut board = shared.borrow_mut();
             board.ppb = Some(ppb.clone());
@@ -250,6 +294,15 @@ impl Rp2040 {
             board.dma = Some(dma.clone());
             board.pio = [Some(pio0.clone()), Some(pio1.clone())];
             board.usb_ctrl = Some(usb_ctrl.clone());
+            board.sysinfo = Some(sysinfo.clone());
+            board.syscfg = Some(syscfg.clone());
+            board.busctrl = Some(busctrl.clone());
+            board.tbman = Some(tbman.clone());
+            board.resets = Some(resets.clone());
+            board.psm = Some(psm.clone());
+            board.io = Some(io.clone());
+            board.pads_bank0 = Some(pads_bank0.clone());
+            board.pads_qspi = Some(pads_qspi.clone());
         }
         let pio = [pio0, pio1];
         let rp2040 = Self {
@@ -272,6 +325,15 @@ impl Rp2040 {
             dma,
             pio,
             usb_ctrl,
+            sysinfo,
+            syscfg,
+            busctrl,
+            tbman,
+            resets,
+            psm,
+            io,
+            pads_bank0,
+            pads_qspi,
             gpio,
             qspi,
         };
@@ -325,12 +387,21 @@ impl Rp2040 {
     }
 
     fn register_real_peripherals(&self) {
-        let entries: [(u32, Rc<dyn Peripheral>); 9] = [
+        let entries: Vec<(u32, Rc<dyn Peripheral>)> = vec![
             (0x40008, Rc::new(self.clocks.clone())),
+            (0x40000, Rc::new(self.sysinfo.clone())),
+            (0x40004, Rc::new(self.syscfg.clone())),
+            (0x4000c, Rc::new(self.resets.clone())),
+            (0x40010, Rc::new(self.psm.clone())),
+            (0x40014, Rc::new(self.io.clone())),
+            (0x4001c, Rc::new(self.pads_bank0.clone())),
+            (0x40020, Rc::new(self.pads_qspi.clone())),
             (0x40024, Rc::new(self.xosc.clone())),
             (0x40028, Rc::new(self.pll_sys.clone())),
             (0x4002c, Rc::new(self.pll_usb.clone())),
             (0x40050, Rc::new(self.pwm.clone())),
+            (0x40030, Rc::new(self.busctrl.clone())),
+            (0x4006c, Rc::new(self.tbman.clone())),
             (0x40054, Rc::new(self.timer.clone())),
             (0x50110, Rc::new(self.usb_ctrl.clone())),
             (0x50200, Rc::new(self.pio[0].clone())),
@@ -387,7 +458,7 @@ impl Rp2040 {
             .iter()
             .enumerate()
             .fold(0, |acc, (index, pin)| {
-                if pin.input_value() {
+                if pin.raw_input_value() {
                     acc | (1 << index)
                 } else {
                     acc

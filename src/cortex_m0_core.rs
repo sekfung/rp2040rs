@@ -51,6 +51,7 @@ pub struct CoreState {
     pub(crate) pending_pendsv: bool,
     pub(crate) pending_svc: bool,
     pub(crate) pending_systick: bool,
+    pub(crate) interrupt_nmi_mask: u32,
     pub(crate) vtor: u32,
     pub(crate) shpr2: u32,
     pub(crate) shpr3: u32,
@@ -81,6 +82,7 @@ impl CoreState {
             pending_pendsv: false,
             pending_svc: false,
             pending_systick: false,
+            interrupt_nmi_mask: 0,
             vtor: 0,
             shpr2: 0,
             shpr3: 0,
@@ -314,6 +316,14 @@ impl Core {
 
     pub fn set_pending_nmi(&self, value: bool) {
         self.state.borrow_mut().pending_nmi = value;
+    }
+
+    pub fn interrupt_nmi_mask(&self) -> u32 {
+        self.state.borrow().interrupt_nmi_mask
+    }
+
+    pub fn set_interrupt_nmi_mask(&self, value: u32) {
+        self.state.borrow_mut().interrupt_nmi_mask = value;
     }
 
     pub fn pending_pendsv(&self) -> bool {

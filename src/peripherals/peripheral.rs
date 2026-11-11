@@ -24,6 +24,7 @@ pub trait Peripheral {
     fn reset(&self) {}
 }
 
+#[derive(Clone)]
 pub struct BasePeripheral {
     name: String,
     board: Weak<RefCell<BoardShared>>,

@@ -5,6 +5,7 @@
 pub mod clock;
 pub mod cortex_m0_core;
 pub mod gpio_pin;
+pub mod interpolator;
 pub mod irq;
 pub mod peripherals;
 pub mod rp2040;
