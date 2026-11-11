@@ -418,6 +418,12 @@ impl Core {
         };
         let opcode_pc = self.pc() & !1;
         let opcode = bus.read_u16(opcode_pc);
+        let wide_instruction = opcode >> 12 == 0b1111 || opcode >> 11 == 0b11101;
+        let opcode2 = if wide_instruction {
+            bus.read_u16(opcode_pc.wrapping_add(2))
+        } else {
+            0
+        };
         self.set_pc(self.pc().wrapping_add(2));
         let mut delta_cycles = 1u32;
 
@@ -509,14 +515,29 @@ impl Core {
             let rdn = (opcode & 0x7) as usize;
             let rm = ((opcode >> 3) & 0x7) as usize;
             let shift = self.reg(rm) & 0xff;
-            if shift != 0 {
-                let (result, carry) = self.arithmetic_shift_right(self.reg(rdn), shift);
-                self.set_reg(rdn, result);
-                self.set_nz(result);
-                self.set_c(carry);
-            } else {
-                self.set_nz(self.reg(rdn));
+            let (result, carry) = self.arithmetic_shift_right(self.reg(rdn), shift);
+            self.set_reg(rdn, result);
+            self.set_nz(result);
+            self.set_c(carry);
+        } else if opcode >> 12 == 0b1101 && ((opcode >> 9) & 0x7) != 0b111 {
+            // B (conditional)
+            let mut imm8 = ((opcode & 0xff) << 1) as i32;
+            if imm8 & (1 << 8) != 0 {
+                imm8 = (imm8 & 0x1ff) - 0x200;
             }
+            let cond = ((opcode >> 8) & 0xf) as u32;
+            if self.check_condition(cond) {
+                self.set_pc(self.pc().wrapping_add(imm8 as u32).wrapping_add(2));
+                delta_cycles += 1;
+            }
+        } else if opcode >> 11 == 0b11100 {
+            // B (unconditional)
+            let mut imm11 = ((opcode & 0x7ff) << 1) as i32;
+            if imm11 & (1 << 11) != 0 {
+                imm11 = (imm11 & 0x7ff) - 0x800;
+            }
+            self.set_pc(self.pc().wrapping_add(imm11 as u32).wrapping_add(2));
+            delta_cycles += 1;
         } else if opcode >> 6 == 0b0100001110 {
             // BICS Rdn, Rm
             let rdn = (opcode & 0x7) as usize;
@@ -524,6 +545,252 @@ impl Core {
             let result = self.reg(rdn) & !self.reg(rm);
             self.set_reg(rdn, result);
             self.set_nz(result);
+        } else if opcode >> 8 == 0b10111110 {
+            // BKPT
+            self.state.borrow_mut().break_rewind = 2;
+            self.fire_break(u32::from(opcode & 0xff));
+        } else if opcode >> 11 == 0b11110 && opcode2 >> 14 == 0b11 && ((opcode2 >> 12) & 1) == 1 {
+            // BL
+            let imm11 = u32::from(opcode2 & 0x7ff);
+            let j2 = u32::from((opcode2 >> 11) & 1);
+            let j1 = u32::from((opcode2 >> 13) & 1);
+            let imm10 = u32::from(opcode & 0x3ff);
+            let s = u32::from((opcode >> 10) & 1);
+            let i1 = 1 - (s ^ j1);
+            let i2 = 1 - (s ^ j2);
+            let imm32 = ((s * 0xff) << 24) | (i1 << 23) | (i2 << 22) | (imm10 << 12) | (imm11 << 1);
+            self.set_lr(self.pc().wrapping_add(2) | 1);
+            self.set_pc(self.pc().wrapping_add(2).wrapping_add(imm32));
+            delta_cycles += 2;
+        } else if opcode >> 7 == 0b010001111 && opcode & 0x7 == 0 {
+            // BLX Rm
+            let rm = ((opcode >> 3) & 0xf) as usize;
+            self.set_lr(self.pc() | 1);
+            self.set_pc(self.reg(rm) & !1);
+            delta_cycles += 1;
+        } else if opcode >> 7 == 0b010001110 && opcode & 0x7 == 0 {
+            // BX Rm
+            let rm = ((opcode >> 3) & 0xf) as usize;
+            self.bx_write_pc(self.reg(rm));
+            delta_cycles += 1;
+        } else if opcode >> 6 == 0b0100001011 {
+            // CMN (register)
+            let rm = ((opcode >> 3) & 0x7) as usize;
+            let rn = (opcode & 0x7) as usize;
+            self.add_with_carry(self.reg(rn), self.reg(rm), 0, true);
+        } else if opcode >> 11 == 0b00101 {
+            // CMP immediate
+            let rn = ((opcode >> 8) & 0x7) as usize;
+            let imm8 = u32::from(opcode & 0xff);
+            self.subtract_with_carry(self.reg(rn), imm8, 1, true);
+        } else if opcode >> 6 == 0b0100001010 {
+            // CMP (register)
+            let rm = ((opcode >> 3) & 0x7) as usize;
+            let rn = (opcode & 0x7) as usize;
+            self.subtract_with_carry(self.reg(rn), self.reg(rm), 1, true);
+        } else if opcode >> 8 == 0b01000101 {
+            // CMP (register) T2
+            let rm = ((opcode >> 3) & 0xf) as usize;
+            let rn = (((opcode >> 4) & 0x8) | (opcode & 0x7)) as usize;
+            self.subtract_with_carry(self.reg(rn), self.reg(rm), 1, true);
+        } else if opcode == 0xb672 {
+            // CPSID i
+            self.state.borrow_mut().pm = true;
+        } else if opcode == 0xb662 {
+            // CPSIE i
+            self.state.borrow_mut().pm = false;
+            self.state.borrow_mut().interrupts_updated = true;
+        } else if opcode == 0xf3bf && (opcode2 & 0xfff0) == 0x8f50 {
+            // DMB SY
+            self.set_pc(self.pc().wrapping_add(2));
+            delta_cycles += 2;
+        } else if opcode == 0xf3bf && (opcode2 & 0xfff0) == 0x8f40 {
+            // DSB SY
+            self.set_pc(self.pc().wrapping_add(2));
+            delta_cycles += 2;
+        } else if opcode >> 6 == 0b0100000001 {
+            // EORS
+            let rm = ((opcode >> 3) & 0x7) as usize;
+            let rdn = (opcode & 0x7) as usize;
+            let result = self.reg(rm) ^ self.reg(rdn);
+            self.set_reg(rdn, result);
+            self.set_nz(result);
+        } else if opcode == 0xf3bf && (opcode2 & 0xfff0) == 0x8f60 {
+            // ISB SY
+            self.set_pc(self.pc().wrapping_add(2));
+            delta_cycles += 2;
+        } else if opcode >> 11 == 0b11001 {
+            // LDMIA
+            let rn = ((opcode >> 8) & 0x7) as usize;
+            let registers = opcode & 0xff;
+            let mut address = self.reg(rn);
+            for i in 0..8 {
+                if registers & (1 << i) != 0 {
+                    self.set_reg(i, bus.read_u32(address));
+                    address = address.wrapping_add(4);
+                    delta_cycles += 1;
+                }
+            }
+            if registers & (1 << rn) == 0 {
+                self.set_reg(rn, address);
+            }
+        } else if opcode >> 11 == 0b01101 {
+            // LDR (immediate)
+            let imm5 = u32::from((opcode >> 6) & 0x1f) << 2;
+            let rn = ((opcode >> 3) & 0x7) as usize;
+            let rt = (opcode & 0x7) as usize;
+            let addr = self.reg(rn).wrapping_add(imm5);
+            delta_cycles += self.cycles_io(addr);
+            self.set_reg(rt, bus.read_u32(addr));
+        } else if opcode >> 11 == 0b10011 {
+            // LDR (sp + immediate)
+            let rt = ((opcode >> 8) & 0x7) as usize;
+            let imm8 = u32::from(opcode & 0xff) << 2;
+            let addr = self.sp().wrapping_add(imm8);
+            delta_cycles += self.cycles_io(addr);
+            self.set_reg(rt, bus.read_u32(addr));
+        } else if opcode >> 11 == 0b01001 {
+            // LDR (literal)
+            let imm8 = u32::from(opcode & 0xff) << 2;
+            let rt = ((opcode >> 8) & 0x7) as usize;
+            let next_pc = self.pc().wrapping_add(2) & !3;
+            let addr = next_pc.wrapping_add(imm8);
+            delta_cycles += self.cycles_io(addr);
+            self.set_reg(rt, bus.read_u32(addr));
+        } else if opcode >> 9 == 0b0101100 {
+            // LDR (register)
+            let rm = ((opcode >> 6) & 0x7) as usize;
+            let rn = ((opcode >> 3) & 0x7) as usize;
+            let rt = (opcode & 0x7) as usize;
+            let addr = self.reg(rm).wrapping_add(self.reg(rn));
+            delta_cycles += self.cycles_io(addr);
+            self.set_reg(rt, bus.read_u32(addr));
+        } else if opcode >> 11 == 0b01111 {
+            // LDRB (immediate)
+            let imm5 = u32::from((opcode >> 6) & 0x1f);
+            let rn = ((opcode >> 3) & 0x7) as usize;
+            let rt = (opcode & 0x7) as usize;
+            let addr = self.reg(rn).wrapping_add(imm5);
+            delta_cycles += self.cycles_io(addr);
+            self.set_reg(rt, u32::from(bus.read_u8(addr)));
+        } else if opcode >> 9 == 0b0101110 {
+            // LDRB (register)
+            let rm = ((opcode >> 6) & 0x7) as usize;
+            let rn = ((opcode >> 3) & 0x7) as usize;
+            let rt = (opcode & 0x7) as usize;
+            let addr = self.reg(rm).wrapping_add(self.reg(rn));
+            delta_cycles += self.cycles_io(addr);
+            self.set_reg(rt, u32::from(bus.read_u8(addr)));
+        } else if opcode >> 11 == 0b10001 {
+            // LDRH (immediate)
+            let imm5 = u32::from((opcode >> 6) & 0x1f) << 1;
+            let rn = ((opcode >> 3) & 0x7) as usize;
+            let rt = (opcode & 0x7) as usize;
+            let addr = self.reg(rn).wrapping_add(imm5);
+            delta_cycles += self.cycles_io(addr);
+            self.set_reg(rt, u32::from(bus.read_u16(addr)));
+        } else if opcode >> 9 == 0b0101101 {
+            // LDRH (register)
+            let rm = ((opcode >> 6) & 0x7) as usize;
+            let rn = ((opcode >> 3) & 0x7) as usize;
+            let rt = (opcode & 0x7) as usize;
+            let addr = self.reg(rm).wrapping_add(self.reg(rn));
+            delta_cycles += self.cycles_io(addr);
+            self.set_reg(rt, u32::from(bus.read_u16(addr)));
+        } else if opcode >> 9 == 0b0101011 {
+            // LDRSB
+            let rm = ((opcode >> 6) & 0x7) as usize;
+            let rn = ((opcode >> 3) & 0x7) as usize;
+            let rt = (opcode & 0x7) as usize;
+            let addr = self.reg(rm).wrapping_add(self.reg(rn));
+            delta_cycles += self.cycles_io(addr);
+            self.set_reg(rt, sign_extend_8(u32::from(bus.read_u8(addr))));
+        } else if opcode >> 9 == 0b0101111 {
+            // LDRSH
+            let rm = ((opcode >> 6) & 0x7) as usize;
+            let rn = ((opcode >> 3) & 0x7) as usize;
+            let rt = (opcode & 0x7) as usize;
+            let addr = self.reg(rm).wrapping_add(self.reg(rn));
+            delta_cycles += self.cycles_io(addr);
+            self.set_reg(rt, sign_extend_16(u32::from(bus.read_u16(addr))));
+        } else if opcode >> 11 == 0b00000 {
+            // LSLS (immediate)
+            let imm5 = u32::from((opcode >> 6) & 0x1f);
+            let rm = ((opcode >> 3) & 0x7) as usize;
+            let rd = (opcode & 0x7) as usize;
+            let input = self.reg(rm);
+            let result = input.wrapping_shl(imm5);
+            self.set_reg(rd, result);
+            self.set_nz(result);
+            self.set_c(if imm5 != 0 {
+                input & (1 << (32 - imm5)) != 0
+            } else {
+                self.c()
+            });
+        } else if opcode >> 6 == 0b0100000010 {
+            // LSLS (register)
+            let rm = ((opcode >> 3) & 0x7) as usize;
+            let rdn = (opcode & 0x7) as usize;
+            let input = self.reg(rdn);
+            let shift = self.reg(rm) & 0xff;
+            let result = if shift >= 32 {
+                0
+            } else {
+                input.wrapping_shl(shift)
+            };
+            self.set_reg(rdn, result);
+            self.set_nz(result);
+            self.set_c(if shift != 0 {
+                input & (1u32.wrapping_shl(32 - shift)) != 0
+            } else {
+                self.c()
+            });
+        } else if opcode >> 11 == 0b00001 {
+            // LSRS (immediate)
+            let imm5 = u32::from((opcode >> 6) & 0x1f);
+            let rm = ((opcode >> 3) & 0x7) as usize;
+            let rd = (opcode & 0x7) as usize;
+            let input = self.reg(rm);
+            let result = if imm5 != 0 { input >> imm5 } else { 0 };
+            self.set_reg(rd, result);
+            self.set_nz(result);
+            self.set_c(((input >> if imm5 != 0 { imm5 - 1 } else { 31 }) & 1) != 0);
+        } else if opcode >> 6 == 0b0100000011 {
+            // LSRS (register)
+            let rm = ((opcode >> 3) & 0x7) as usize;
+            let rdn = (opcode & 0x7) as usize;
+            let shift = self.reg(rm) & 0xff;
+            let input = self.reg(rdn);
+            let result = if shift < 32 { input >> shift } else { 0 };
+            self.set_reg(rdn, result);
+            self.set_nz(result);
+            self.set_c(if shift <= 32 && shift != 0 {
+                (input >> (shift - 1)) & 1 != 0
+            } else {
+                false
+            });
+        } else if opcode >> 8 == 0b01000110 {
+            // MOV (high register)
+            let rm = ((opcode >> 3) & 0xf) as usize;
+            let rd = (((opcode >> 4) & 0x8) | (opcode & 0x7)) as usize;
+            let mut value = if rm == 15 {
+                self.pc().wrapping_add(2)
+            } else {
+                self.reg(rm)
+            };
+            if rd == 15 {
+                delta_cycles += 1;
+                value &= !1;
+            } else if rd == 13 {
+                value &= !3;
+            }
+            if rd == 15 {
+                self.set_pc(value);
+            } else if rd == 13 {
+                self.set_sp(value);
+            } else {
+                self.set_reg(rd, value);
+            }
         } else if opcode >> 11 == 0b00100 {
             // MOVS Rd, #imm8
             let value = u32::from(opcode & 0xff);
@@ -531,12 +798,41 @@ impl Core {
             self.state.borrow_mut().registers[rd] = value;
             self.set_n(value & 0x8000_0000 != 0);
             self.set_z(value == 0);
-        } else if opcode >> 7 == 0x8e && opcode & 0x7 == 0 {
-            // BX Rm
-            let rm = ((opcode >> 3) & 0xf) as usize;
-            let address = self.reg(rm);
-            self.bx_write_pc(address);
-            delta_cycles += 1;
+        } else if opcode == 0b1111001111101111 && opcode2 >> 12 == 0b1000 {
+            // MRS
+            let sysm = u32::from(opcode2 & 0xff);
+            let rd = ((opcode2 >> 8) & 0xf) as usize;
+            self.set_reg(rd, self.read_special_register(sysm));
+            self.set_pc(self.pc().wrapping_add(2));
+            delta_cycles += 2;
+        } else if opcode >> 4 == 0b111100111000 && opcode2 >> 8 == 0b10001000 {
+            // MSR
+            let sysm = u32::from(opcode2 & 0xff);
+            let rn = (opcode & 0xf) as usize;
+            self.write_special_register(sysm, self.reg(rn));
+            self.set_pc(self.pc().wrapping_add(2));
+            delta_cycles += 2;
+        } else if opcode >> 6 == 0b0100001101 {
+            // MULS
+            let rn = ((opcode >> 3) & 0x7) as usize;
+            let rdm = (opcode & 0x7) as usize;
+            let result = self.reg(rn).wrapping_mul(self.reg(rdm));
+            self.set_reg(rdm, result);
+            self.set_nz(result);
+        } else if opcode >> 6 == 0b0100001111 {
+            // MVNS
+            let rm = ((opcode >> 3) & 0x7) as usize;
+            let rd = (opcode & 0x7) as usize;
+            let result = !self.reg(rm);
+            self.set_reg(rd, result);
+            self.set_nz(result);
+        } else if opcode >> 6 == 0b0100001100 {
+            // ORRS
+            let rm = ((opcode >> 3) & 0x7) as usize;
+            let rdn = (opcode & 0x7) as usize;
+            let result = self.reg(rdn) | self.reg(rm);
+            self.set_reg(rdn, result);
+            self.set_nz(result);
         } else if opcode >> 9 == 0x5a {
             // PUSH
             let mut bit_count = 0u32;
@@ -577,6 +873,180 @@ impl Core {
             }
         } else if opcode == 0b1011_1111_0000_0000 {
             // NOP
+        } else if opcode >> 6 == 0b0100000111 {
+            // ROR
+            let rm = ((opcode >> 3) & 0x7) as usize;
+            let rdn = (opcode & 0x7) as usize;
+            let input = self.reg(rdn);
+            let shift = self.reg(rm) & 0xff;
+            let result = if shift == 0 {
+                input
+            } else {
+                input.rotate_right(shift)
+            };
+            self.set_reg(rdn, result);
+            self.set_nz(result);
+            self.set_c(result & 0x8000_0000 != 0);
+        } else if opcode >> 6 == 0b0100001001 {
+            // RSBS
+            let rn = ((opcode >> 3) & 0x7) as usize;
+            let rd = (opcode & 0x7) as usize;
+            let result = self.subtract_with_carry(0, self.reg(rn), 1, true);
+            self.set_reg(rd, result);
+        } else if opcode >> 6 == 0b0100000110 {
+            // SBCS
+            let rm = ((opcode >> 3) & 0x7) as usize;
+            let rdn = (opcode & 0x7) as usize;
+            let result =
+                self.subtract_with_carry(self.reg(rdn), self.reg(rm), u32::from(self.c()), true);
+            self.set_reg(rdn, result);
+        } else if opcode == 0b1011111101000000 {
+            // SEV
+        } else if opcode >> 11 == 0b11000 {
+            // STMIA
+            let rn = ((opcode >> 8) & 0x7) as usize;
+            let registers = opcode & 0xff;
+            let mut address = self.reg(rn);
+            for i in 0..8 {
+                if registers & (1 << i) != 0 {
+                    bus.write_u32(address, self.reg(i));
+                    address = address.wrapping_add(4);
+                    delta_cycles += 1;
+                }
+            }
+            if registers & (1 << rn) == 0 {
+                self.set_reg(rn, address);
+            }
+        } else if opcode >> 11 == 0b01100 {
+            // STR (immediate)
+            let imm5 = u32::from((opcode >> 6) & 0x1f) << 2;
+            let rn = ((opcode >> 3) & 0x7) as usize;
+            let rt = (opcode & 0x7) as usize;
+            let address = self.reg(rn).wrapping_add(imm5);
+            delta_cycles += self.cycles_io(address);
+            bus.write_u32(address, self.reg(rt));
+        } else if opcode >> 11 == 0b10010 {
+            // STR (sp + immediate)
+            let rt = ((opcode >> 8) & 0x7) as usize;
+            let imm8 = u32::from(opcode & 0xff) << 2;
+            let address = self.sp().wrapping_add(imm8);
+            delta_cycles += self.cycles_io(address);
+            bus.write_u32(address, self.reg(rt));
+        } else if opcode >> 9 == 0b0101000 {
+            // STR (register)
+            let rm = ((opcode >> 6) & 0x7) as usize;
+            let rn = ((opcode >> 3) & 0x7) as usize;
+            let rt = (opcode & 0x7) as usize;
+            let address = self.reg(rm).wrapping_add(self.reg(rn));
+            delta_cycles += self.cycles_io(address);
+            bus.write_u32(address, self.reg(rt));
+        } else if opcode >> 11 == 0b01110 {
+            // STRB (immediate)
+            let imm5 = u32::from((opcode >> 6) & 0x1f);
+            let rn = ((opcode >> 3) & 0x7) as usize;
+            let rt = (opcode & 0x7) as usize;
+            let address = self.reg(rn).wrapping_add(imm5);
+            delta_cycles += self.cycles_io(address);
+            bus.write_u8(address, self.reg(rt) as u8);
+        } else if opcode >> 9 == 0b0101010 {
+            // STRB (register)
+            let rm = ((opcode >> 6) & 0x7) as usize;
+            let rn = ((opcode >> 3) & 0x7) as usize;
+            let rt = (opcode & 0x7) as usize;
+            let address = self.reg(rm).wrapping_add(self.reg(rn));
+            delta_cycles += self.cycles_io(address);
+            bus.write_u8(address, self.reg(rt) as u8);
+        } else if opcode >> 11 == 0b10000 {
+            // STRH (immediate)
+            let imm5 = u32::from((opcode >> 6) & 0x1f) << 1;
+            let rn = ((opcode >> 3) & 0x7) as usize;
+            let rt = (opcode & 0x7) as usize;
+            let address = self.reg(rn).wrapping_add(imm5);
+            delta_cycles += self.cycles_io(address);
+            bus.write_u16(address, self.reg(rt) as u16);
+        } else if opcode >> 9 == 0b0101001 {
+            // STRH (register)
+            let rm = ((opcode >> 6) & 0x7) as usize;
+            let rn = ((opcode >> 3) & 0x7) as usize;
+            let rt = (opcode & 0x7) as usize;
+            let address = self.reg(rm).wrapping_add(self.reg(rn));
+            delta_cycles += self.cycles_io(address);
+            bus.write_u16(address, self.reg(rt) as u16);
+        } else if opcode >> 7 == 0b101100001 {
+            // SUB SP, #imm7
+            let imm = u32::from((opcode & 0x7f) << 2);
+            self.set_sp(self.sp().wrapping_sub(imm));
+        } else if opcode >> 9 == 0b0001111 {
+            // SUBS Rd, Rn, #imm3
+            let imm3 = u32::from((opcode >> 6) & 0x7);
+            let rn = ((opcode >> 3) & 0x7) as usize;
+            let rd = (opcode & 0x7) as usize;
+            let result = self.subtract_with_carry(self.reg(rn), imm3, 1, true);
+            self.set_reg(rd, result);
+        } else if opcode >> 11 == 0b00111 {
+            // SUBS Rdn, #imm8
+            let imm8 = u32::from(opcode & 0xff);
+            let rdn = ((opcode >> 8) & 0x7) as usize;
+            let result = self.subtract_with_carry(self.reg(rdn), imm8, 1, true);
+            self.set_reg(rdn, result);
+        } else if opcode >> 9 == 0b0001101 {
+            // SUBS Rd, Rn, Rm
+            let rm = ((opcode >> 6) & 0x7) as usize;
+            let rn = ((opcode >> 3) & 0x7) as usize;
+            let rd = (opcode & 0x7) as usize;
+            let result = self.subtract_with_carry(self.reg(rn), self.reg(rm), 1, true);
+            self.set_reg(rd, result);
+        } else if opcode >> 8 == 0b11011111 {
+            // SVC
+            self.state.borrow_mut().pending_svc = true;
+            self.state.borrow_mut().interrupts_updated = true;
+        } else if opcode >> 6 == 0b1011001001 {
+            // SXTB
+            let rm = ((opcode >> 3) & 0x7) as usize;
+            let rd = (opcode & 0x7) as usize;
+            self.set_reg(rd, sign_extend_8(self.reg(rm)));
+        } else if opcode >> 6 == 0b1011001000 {
+            // SXTH
+            let rm = ((opcode >> 3) & 0x7) as usize;
+            let rd = (opcode & 0x7) as usize;
+            self.set_reg(rd, sign_extend_16(self.reg(rm)));
+        } else if opcode >> 6 == 0b0100001000 {
+            // TST
+            let rm = ((opcode >> 3) & 0x7) as usize;
+            let rn = (opcode & 0x7) as usize;
+            let result = self.reg(rn) & self.reg(rm);
+            self.set_nz(result);
+        } else if opcode >> 8 == 0b11011110 {
+            // UDF
+            self.state.borrow_mut().break_rewind = 2;
+            self.fire_break(u32::from(opcode & 0xff));
+        } else if opcode >> 4 == 0b111101111111 && opcode2 >> 12 == 0b1010 {
+            // UDF (T2)
+            let imm4 = u32::from(opcode & 0xf);
+            let imm12 = u32::from(opcode2 & 0xfff);
+            self.state.borrow_mut().break_rewind = 4;
+            self.fire_break((imm4 << 12) | imm12);
+            self.set_pc(self.pc().wrapping_add(2));
+        } else if opcode >> 6 == 0b1011001011 {
+            // UXTB
+            let rm = ((opcode >> 3) & 0x7) as usize;
+            let rd = (opcode & 0x7) as usize;
+            self.set_reg(rd, self.reg(rm) & 0xff);
+        } else if opcode >> 6 == 0b1011001010 {
+            // UXTH
+            let rm = ((opcode >> 3) & 0x7) as usize;
+            let rd = (opcode & 0x7) as usize;
+            self.set_reg(rd, self.reg(rm) & 0xffff);
+        } else if opcode == 0b1011111100100000 {
+            // WFE
+            delta_cycles += 1;
+            self.state.borrow_mut().waiting = true;
+        } else if opcode == 0b1011111100110000 {
+            // WFI
+            delta_cycles += 1;
+            self.state.borrow_mut().waiting = true;
+        } else if opcode == 0b1011111100010000 {
+            // YIELD
         } else {
             let board = self.board.upgrade();
             if let Some(board) = board {
@@ -588,6 +1058,60 @@ impl Core {
         }
         self.state.borrow_mut().cycles += u64::from(delta_cycles);
         delta_cycles
+    }
+
+    fn check_condition(&self, cond: u32) -> bool {
+        let result = match cond >> 1 {
+            0b000 => self.z(),
+            0b001 => self.c(),
+            0b010 => self.n(),
+            0b011 => self.v(),
+            0b100 => self.c() && !self.z(),
+            0b101 => self.n() == self.v(),
+            0b110 => self.n() == self.v() && !self.z(),
+            0b111 => true,
+            _ => false,
+        };
+        if cond & 1 != 0 && cond != 0b1111 {
+            !result
+        } else {
+            result
+        }
+    }
+
+    fn subtract_with_carry(&self, a: u32, b: u32, carry: u32, set_flags: bool) -> u32 {
+        let borrow = 1u64 - u64::from(carry);
+        let subtrahend = u64::from(b) + borrow;
+        let result = (u64::from(a)).wrapping_sub(subtrahend) as u32;
+        if set_flags {
+            self.set_n(result & 0x8000_0000 != 0);
+            self.set_z(result == 0);
+            self.set_c(u64::from(a) >= subtrahend);
+            let overflow = ((a ^ b) & (a ^ result) & 0x8000_0000) != 0;
+            self.set_v(overflow);
+        }
+        result
+    }
+
+    fn cycles_io(&self, address: u32) -> u32 {
+        if (0x2000_0000..0x2004_2000).contains(&address)
+            || (0x1000_0000..0x1400_0000).contains(&address)
+            || address < 0x1000
+        {
+            0
+        } else {
+            1
+        }
+    }
+
+    fn fire_break(&self, code: u32) {
+        if let Some(board) = self.board.upgrade() {
+            let mut callback = board.borrow_mut().on_break.take();
+            if let Some(callback) = callback.as_mut() {
+                callback(code);
+            }
+            board.borrow_mut().on_break = callback;
+        }
     }
 
     fn set_nz(&self, value: u32) {
@@ -926,7 +1450,7 @@ pub fn exception_priority_constants() -> (u32, u32, u32) {
 
 #[cfg(test)]
 mod tests {
-    use crate::test_support::TestDriver;
+    use crate::test_support::{Registers, TestDriver};
     use crate::utils::assembler::{
         opcode_adcs, opcode_add_reg, opcode_add_sp2, opcode_add_sp_plus_imm, opcode_adds1,
         opcode_adds2, opcode_adds_reg, opcode_adr, opcode_ands, opcode_asrs, opcode_asrs_reg,
@@ -1256,5 +1780,560 @@ mod tests {
         let r = cpu.read_registers();
         assert_eq!(r.r0, 0xffff_0000);
         assert!(r.n && !r.z);
+    }
+
+    use crate::utils::assembler::{
+        opcode_bl, opcode_blx, opcode_bt1, opcode_bt2, opcode_bx, opcode_cmn, opcode_cmp_imm,
+        opcode_cmp_reg_t1, opcode_cmp_reg_t2, opcode_dmbsy, opcode_dsbsy, opcode_eors,
+        opcode_isbsy, opcode_ldmia, opcode_ldr_imm, opcode_ldr_lit, opcode_ldr_reg, opcode_ldr_sp,
+        opcode_ldrb, opcode_ldrb_reg, opcode_ldrh, opcode_ldrh_reg, opcode_ldrsb, opcode_ldrsh,
+        opcode_lsls_imm, opcode_mov, opcode_movs, opcode_mrs, opcode_msr, opcode_muls, opcode_mvns,
+        opcode_orrs, opcode_pop, opcode_push, opcode_udf, opcode_udf2,
+    };
+
+    fn run16_at(pc: u32, opcode: u16) -> Registers {
+        let cpu = TestDriver::new();
+        cpu.set_pc(pc);
+        cpu.write_u16(pc, opcode);
+        cpu.single_step();
+        cpu.read_registers()
+    }
+
+    fn run32_at(pc: u32, opcode: u32) -> Registers {
+        let cpu = TestDriver::new();
+        cpu.set_pc(pc);
+        cpu.write_u32(pc, opcode);
+        cpu.single_step();
+        cpu.read_registers()
+    }
+
+    #[test]
+    fn should_execute_bl_0x34() {
+        let r = run32_at(0x2000_0000, opcode_bl(0x34));
+        assert_eq!(r.pc, 0x2000_0038);
+        assert_eq!(r.lr, 0x2000_0005);
+    }
+
+    #[test]
+    fn should_execute_bl_minus_0x10() {
+        let r = run32_at(0x2000_0000, opcode_bl(-0x10));
+        assert_eq!(r.pc, 0x2000_0004u32.wrapping_sub(0x10));
+        assert_eq!(r.lr, 0x2000_0005);
+    }
+
+    #[test]
+    fn should_execute_bl_minus_3242() {
+        let r = run32_at(0x2000_0000, opcode_bl(-3242));
+        assert_eq!(r.pc, 0x2000_0004u32.wrapping_sub(3242));
+        assert_eq!(r.lr, 0x2000_0005);
+    }
+
+    #[test]
+    fn should_execute_blx_r3() {
+        let cpu = driver();
+        cpu.set_registers(&[(3, 0x2000_0201)]);
+        cpu.write_u32(0x2000_0000, opcode_blx(3) as u32);
+        cpu.single_step();
+        let r = cpu.read_registers();
+        assert_eq!(r.pc, 0x2000_0200);
+        assert_eq!(r.lr, 0x2000_0003);
+    }
+
+    #[test]
+    fn should_execute_b_n_minus_20() {
+        let r = run16_at(0x2000_0012, opcode_bt2(0xfec));
+        assert_eq!(r.pc, 0x2000_0002);
+    }
+
+    #[test]
+    fn should_execute_bne_n_minus_6() {
+        let cpu = TestDriver::new();
+        cpu.set_pc(0x2000_0012);
+        cpu.set_flags(false, false, false, false);
+        cpu.write_u16(0x2000_0012, opcode_bt1(1, 0x1f8));
+        cpu.single_step();
+        assert_eq!(cpu.read_registers().pc, 0x2000_000e);
+    }
+
+    #[test]
+    fn should_execute_bx_lr() {
+        let cpu = driver();
+        cpu.set_registers(&[(14, 0x1000_0200)]);
+        cpu.write_u16(0x2000_0000, opcode_bx(14));
+        cpu.single_step();
+        assert_eq!(cpu.read_registers().pc, 0x1000_0200);
+    }
+
+    #[test]
+    fn should_execute_cmn_r7_r2() {
+        let cpu = driver();
+        cpu.set_registers(&[(2, 1), (7, (-2i32) as u32)]);
+        cpu.write_u16(0x2000_0000, opcode_cmn(7, 2));
+        cpu.single_step();
+        let r = cpu.read_registers();
+        assert_eq!(r.r2, 1);
+        assert_eq!(r.r7, (-2i32) as u32);
+        assert!(r.n && !r.z && !r.c && !r.v);
+    }
+
+    #[test]
+    fn should_execute_cmp_r5_66() {
+        let cpu = driver();
+        cpu.set_registers(&[(5, 60)]);
+        cpu.write_u16(0x2000_0000, opcode_cmp_imm(5, 66));
+        cpu.single_step();
+        let r = cpu.read_registers();
+        assert!(r.n && !r.z && !r.c && !r.v);
+    }
+
+    #[test]
+    fn should_set_carry_for_cmp_r0_zero() {
+        let cpu = driver();
+        cpu.set_registers(&[(0, 0x8001_0133)]);
+        cpu.write_u16(0x2000_0000, opcode_cmp_imm(0, 0));
+        cpu.single_step();
+        let r = cpu.read_registers();
+        assert!(r.n && !r.z && r.c && !r.v);
+    }
+
+    #[test]
+    fn should_execute_cmp_r5_r0() {
+        let cpu = driver();
+        cpu.set_registers(&[(5, 60), (0, 56)]);
+        cpu.write_u16(0x2000_0000, opcode_cmp_reg_t1(5, 0));
+        cpu.single_step();
+        let r = cpu.read_registers();
+        assert!(!r.n && !r.z && r.c && !r.v);
+    }
+
+    #[test]
+    fn should_not_set_flags_for_cmp_r2_r0_large_values() {
+        let cpu = driver();
+        cpu.set_registers(&[(0, 0xb71b_0000), (2, 0x00b7_1b00)]);
+        cpu.write_u16(0x2000_0000, opcode_cmp_reg_t1(2, 0));
+        cpu.single_step();
+        let r = cpu.read_registers();
+        assert!(!r.n && !r.z && !r.c && !r.v);
+    }
+
+    #[test]
+    fn should_set_carry_for_cmp_r11_r3() {
+        let cpu = driver();
+        cpu.set_registers(&[(3, 8), (11, 0xffff_ffff)]);
+        cpu.write_u16(0x2000_0000, opcode_cmp_reg_t2(11, 3));
+        cpu.single_step();
+        let r = cpu.read_registers();
+        assert!(r.n && !r.z && r.c && !r.v);
+    }
+
+    #[test]
+    fn should_execute_cmp_ip_r6() {
+        let cpu = driver();
+        cpu.set_registers(&[(6, 56), (12, 60)]);
+        cpu.write_u16(0x2000_0000, opcode_cmp_reg_t2(12, 6));
+        cpu.single_step();
+        let r = cpu.read_registers();
+        assert!(!r.n && !r.z && r.c && !r.v);
+    }
+
+    #[test]
+    fn should_set_nc_for_cmp_r11_r3_zero_and_min() {
+        let cpu = driver();
+        cpu.set_registers(&[(3, 0), (11, 0x8000_0000)]);
+        cpu.write_u16(0x2000_0000, opcode_cmp_reg_t2(11, 3));
+        cpu.single_step();
+        let r = cpu.read_registers();
+        assert!(r.n && !r.z && r.c && !r.v);
+    }
+
+    #[test]
+    fn should_set_nv_for_cmp_r3_r7() {
+        let cpu = driver();
+        cpu.set_registers(&[(3, 0), (7, 0x8000_0000)]);
+        cpu.write_u16(0x2000_0000, opcode_cmp_reg_t1(3, 7));
+        cpu.single_step();
+        let r = cpu.read_registers();
+        assert!(r.n && !r.z && !r.c && r.v);
+    }
+
+    #[test]
+    fn should_set_nv_for_cmp_r11_r3_min_and_zero() {
+        let cpu = driver();
+        cpu.set_registers(&[(3, 0x8000_0000), (11, 0)]);
+        cpu.write_u16(0x2000_0000, opcode_cmp_reg_t2(11, 3));
+        cpu.single_step();
+        let r = cpu.read_registers();
+        assert!(r.n && !r.z && !r.c && r.v);
+    }
+
+    #[test]
+    fn should_set_nc_for_cmp_r3_r7_min_and_zero() {
+        let cpu = driver();
+        cpu.set_registers(&[(3, 0x8000_0000), (7, 0)]);
+        cpu.write_u16(0x2000_0000, opcode_cmp_reg_t1(3, 7));
+        cpu.single_step();
+        let r = cpu.read_registers();
+        assert!(r.n && !r.z && r.c && !r.v);
+    }
+
+    #[test]
+    fn should_decode_dmb_sy() {
+        assert_eq!(run32_at(0x2000_0000, opcode_dmbsy()).pc, 0x2000_0004);
+    }
+
+    #[test]
+    fn should_decode_dsb_sy() {
+        assert_eq!(run32_at(0x2000_0000, opcode_dsbsy()).pc, 0x2000_0004);
+    }
+
+    #[test]
+    fn should_execute_eors_r1_r3() {
+        let cpu = driver();
+        cpu.set_registers(&[(1, 0xf0f0_f0f0), (3, 0x08ff_3007)]);
+        cpu.write_u16(0x2000_0000, opcode_eors(1, 3));
+        cpu.single_step();
+        let r = cpu.read_registers();
+        assert_eq!(r.r1, 0xf80f_c0f7);
+        assert!(r.n && !r.z);
+    }
+
+    #[test]
+    fn should_decode_isb_sy() {
+        assert_eq!(run32_at(0x2000_0000, opcode_isbsy()).pc, 0x2000_0004);
+    }
+
+    #[test]
+    fn should_execute_mov_r3_r8() {
+        let cpu = driver();
+        cpu.set_registers(&[(8, 55)]);
+        cpu.write_u16(0x2000_0000, opcode_mov(3, 8));
+        cpu.single_step();
+        assert_eq!(cpu.read_registers().r3, 55);
+    }
+
+    #[test]
+    fn should_execute_mov_r3_pc() {
+        let r = run16_at(0x2000_0000, opcode_mov(3, 15));
+        assert_eq!(r.r3, 0x2000_0004);
+    }
+
+    #[test]
+    fn should_execute_mov_sp_r8_case() {
+        let cpu = driver();
+        cpu.set_registers(&[(8, 55)]);
+        cpu.write_u16(0x2000_0000, opcode_mov(3, 8));
+        cpu.single_step();
+        assert_eq!(cpu.read_registers().r3, 55);
+    }
+
+    #[test]
+    fn should_execute_muls_r0_r2() {
+        let cpu = driver();
+        cpu.set_registers(&[(0, 5), (2, 1_000_000)]);
+        cpu.write_u16(0x2000_0000, opcode_muls(0, 2));
+        cpu.single_step();
+        let r = cpu.read_registers();
+        assert_eq!(r.r2, 5_000_000);
+        assert!(!r.n && !r.z);
+    }
+
+    #[test]
+    fn should_execute_muls_large_values() {
+        let cpu = driver();
+        cpu.set_registers(&[(0, 2_654_435_769), (2, 340_573_321)]);
+        cpu.write_u16(0x2000_0000, opcode_muls(0, 2));
+        cpu.single_step();
+        assert_eq!(cpu.read_registers().r2, 1);
+    }
+
+    #[test]
+    fn should_set_z_for_muls_zero() {
+        let cpu = driver();
+        cpu.set_registers(&[(0, 0), (2, 1_000_000)]);
+        cpu.write_u16(0x2000_0000, opcode_muls(0, 2));
+        cpu.single_step();
+        let r = cpu.read_registers();
+        assert_eq!(r.r2, 0);
+        assert!(!r.n && r.z);
+    }
+
+    #[test]
+    fn should_set_n_for_muls_negative() {
+        let cpu = driver();
+        cpu.set_registers(&[(0, (-1i32) as u32), (2, 1_000_000)]);
+        cpu.write_u16(0x2000_0000, opcode_muls(0, 2));
+        cpu.single_step();
+        let r = cpu.read_registers();
+        assert_eq!(r.r2, (-1_000_000i32) as u32);
+        assert!(r.n && !r.z);
+    }
+
+    #[test]
+    fn should_execute_mvns_r4_r3() {
+        let cpu = driver();
+        cpu.set_registers(&[(3, 0x1111_5555)]);
+        cpu.write_u16(0x2000_0000, opcode_mvns(4, 3));
+        cpu.single_step();
+        let r = cpu.read_registers();
+        assert_eq!(r.r4, 0xeeee_aaaa);
+        assert!(!r.z && r.n);
+    }
+
+    #[test]
+    fn should_execute_nop() {
+        assert_eq!(run16_at(0x2000_0000, 0xbf00).pc, 0x2000_0002);
+    }
+
+    #[test]
+    fn should_execute_orrs_r5_r0() {
+        let cpu = driver();
+        cpu.set_registers(&[(5, 0xf00f_0000), (0, 0xf000_ffff)]);
+        cpu.write_u16(0x2000_0000, opcode_orrs(5, 0));
+        cpu.single_step();
+        let r = cpu.read_registers();
+        assert_eq!(r.r5, 0xf00f_ffff);
+        assert!(r.n && !r.z);
+    }
+
+    #[test]
+    fn should_execute_pop_pc_r4_r5_r6() {
+        let cpu = driver();
+        cpu.set_registers(&[(13, 0x2000_00f0)]);
+        cpu.write_u16(
+            0x2000_0000,
+            opcode_pop(true, (1 << 4) | (1 << 5) | (1 << 6)),
+        );
+        cpu.write_u32(0x2000_00f0, 0x40);
+        cpu.write_u32(0x2000_00f4, 0x50);
+        cpu.write_u32(0x2000_00f8, 0x60);
+        cpu.write_u32(0x2000_00fc, 0x42);
+        cpu.single_step();
+        let r = cpu.read_registers();
+        assert_eq!(r.sp, 0x2000_0100);
+        assert_eq!((r.r4, r.r5, r.r6, r.pc), (0x40, 0x50, 0x60, 0x42));
+    }
+
+    #[test]
+    fn should_execute_push_r4_r5_r6_lr() {
+        let cpu = driver();
+        cpu.set_registers(&[
+            (13, 0x2000_0100),
+            (4, 0x40),
+            (5, 0x50),
+            (6, 0x60),
+            (14, 0x42),
+        ]);
+        cpu.write_u16(
+            0x2000_0000,
+            opcode_push(true, (1 << 4) | (1 << 5) | (1 << 6)),
+        );
+        cpu.single_step();
+        let r = cpu.read_registers();
+        assert_eq!(r.sp, 0x2000_00f0);
+        assert_eq!(cpu.read_u8(0x2000_00f0), 0x40);
+        assert_eq!(cpu.read_u8(0x2000_00f4), 0x50);
+        assert_eq!(cpu.read_u8(0x2000_00f8), 0x60);
+        assert_eq!(cpu.read_u8(0x2000_00fc), 0x42);
+    }
+
+    #[test]
+    fn should_execute_mrs_r0_ipsr() {
+        let cpu = driver();
+        cpu.set_registers(&[(0, 55)]);
+        cpu.write_u32(0x2000_0000, opcode_mrs(0, 5));
+        cpu.single_step();
+        let r = cpu.read_registers();
+        assert_eq!(r.r0, 0);
+        assert_eq!(r.pc, 0x2000_0004);
+    }
+
+    #[test]
+    fn should_execute_msr_msp_r0() {
+        let cpu = driver();
+        cpu.set_registers(&[(0, 0x1234)]);
+        cpu.write_u32(0x2000_0000, opcode_msr(8, 0));
+        cpu.single_step();
+        let r = cpu.read_registers();
+        assert_eq!(r.sp, 0x1234);
+        assert_eq!(r.pc, 0x2000_0004);
+    }
+
+    #[test]
+    fn should_execute_movs_r5_128() {
+        let r = run16_at(0x2000_0000, opcode_movs(5, 128));
+        assert_eq!((r.r5, r.pc), (128, 0x2000_0002));
+    }
+
+    #[test]
+    fn should_execute_ldmia_r0_r1_r2() {
+        let cpu = driver();
+        cpu.set_registers(&[(0, 0x2000_0010)]);
+        cpu.write_u16(0x2000_0000, opcode_ldmia(0, (1 << 1) | (1 << 2)));
+        cpu.write_u32(0x2000_0010, 0xf00d_f00d);
+        cpu.write_u32(0x2000_0014, 0x4242);
+        cpu.single_step();
+        let r = cpu.read_registers();
+        assert_eq!(
+            (r.pc, r.r0, r.r1, r.r2),
+            (0x2000_0002, 0x2000_0018, 0xf00d_f00d, 0x4242)
+        );
+    }
+
+    #[test]
+    fn should_execute_ldmia_r5_without_writeback() {
+        let cpu = driver();
+        cpu.set_registers(&[(5, 0x2000_0010)]);
+        cpu.write_u16(0x2000_0000, opcode_ldmia(5, 1 << 5));
+        cpu.write_u32(0x2000_0010, 0xf00d_f00d);
+        cpu.single_step();
+        let r = cpu.read_registers();
+        assert_eq!((r.pc, r.r5), (0x2000_0002, 0xf00d_f00d));
+    }
+
+    #[test]
+    fn should_execute_ldr_literal() {
+        let cpu = driver();
+        cpu.write_u16(0x2000_0000, opcode_ldr_lit(0, 148));
+        cpu.write_u32(0x2000_0098, 0x42);
+        cpu.single_step();
+        let r = cpu.read_registers();
+        assert_eq!((r.r0, r.pc), (0x42, 0x2000_0002));
+    }
+
+    #[test]
+    fn should_execute_ldr_immediate() {
+        let cpu = driver();
+        cpu.set_registers(&[(2, 0x2000_0000)]);
+        cpu.write_u16(0x2000_0000, opcode_ldr_imm(3, 2, 24));
+        cpu.write_u32(0x2000_0018, 0x55);
+        cpu.single_step();
+        assert_eq!(cpu.read_registers().r3, 0x55);
+    }
+
+    #[test]
+    fn should_execute_ldr_sp_immediate() {
+        let cpu = driver();
+        cpu.set_registers(&[(13, 0x2000_0000)]);
+        cpu.write_u16(0x2000_0000, opcode_ldr_sp(3, 12));
+        cpu.write_u32(0x2000_000c, 0x55);
+        cpu.single_step();
+        assert_eq!(cpu.read_registers().r3, 0x55);
+    }
+
+    #[test]
+    fn should_execute_ldr_register() {
+        let cpu = driver();
+        cpu.set_registers(&[(5, 0x2000_0000), (6, 8)]);
+        cpu.write_u16(0x2000_0000, opcode_ldr_reg(3, 5, 6));
+        cpu.write_u32(0x2000_0008, 0xff55_4211);
+        cpu.single_step();
+        assert_eq!(cpu.read_registers().r3, 0xff55_4211);
+    }
+
+    #[test]
+    fn should_execute_ldrb_immediate() {
+        let cpu = driver();
+        cpu.set_registers(&[(2, 0x2000_0000)]);
+        cpu.write_u16(0x2000_0000, opcode_ldrb(4, 2, 5));
+        cpu.write_u16(0x2000_0005, 0x7766);
+        cpu.single_step();
+        assert_eq!(cpu.read_registers().r4, 0x66);
+    }
+
+    #[test]
+    fn should_execute_ldrb_register() {
+        let cpu = driver();
+        cpu.set_registers(&[(5, 0x2000_0000), (6, 8)]);
+        cpu.write_u16(0x2000_0000, opcode_ldrb_reg(3, 5, 6));
+        cpu.write_u32(0x2000_0008, 0xff55_4211);
+        cpu.single_step();
+        assert_eq!(cpu.read_registers().r3, 0x11);
+    }
+
+    #[test]
+    fn should_execute_ldrh_immediate_4() {
+        let cpu = driver();
+        cpu.set_registers(&[(7, 0x2000_0000)]);
+        cpu.write_u16(0x2000_0000, opcode_ldrh(3, 7, 4));
+        cpu.write_u32(0x2000_0004, 0xffff_7766);
+        cpu.single_step();
+        assert_eq!(cpu.read_registers().r3, 0x7766);
+    }
+
+    #[test]
+    fn should_execute_ldrh_immediate_6() {
+        let cpu = driver();
+        cpu.set_registers(&[(7, 0x2000_0000)]);
+        cpu.write_u16(0x2000_0000, opcode_ldrh(3, 7, 6));
+        cpu.write_u32(0x2000_0004, 0x3344_7766);
+        cpu.single_step();
+        assert_eq!(cpu.read_registers().r3, 0x3344);
+    }
+
+    #[test]
+    fn should_execute_ldrh_register() {
+        let cpu = driver();
+        cpu.set_registers(&[(5, 0x2000_0000), (6, 8)]);
+        cpu.write_u16(0x2000_0000, opcode_ldrh_reg(3, 5, 6));
+        cpu.write_u32(0x2000_0008, 0xff55_4211);
+        cpu.single_step();
+        assert_eq!(cpu.read_registers().r3, 0x4211);
+    }
+
+    #[test]
+    fn should_execute_ldrsb() {
+        let cpu = driver();
+        cpu.set_registers(&[(3, 0x2000_0000), (5, 6)]);
+        cpu.write_u16(0x2000_0000, opcode_ldrsb(5, 3, 5));
+        cpu.write_u32(0x2000_0006, 0x85);
+        cpu.single_step();
+        assert_eq!(cpu.read_registers().r5, 0xffff_ff85);
+    }
+
+    #[test]
+    fn should_execute_ldrsh() {
+        let cpu = driver();
+        cpu.set_registers(&[(3, 0x2000_0000), (5, 6)]);
+        cpu.write_u16(0x2000_0000, opcode_ldrsh(5, 3, 5));
+        cpu.write_u16(0x2000_0006, 0xf055);
+        cpu.single_step();
+        assert_eq!(cpu.read_registers().r5, 0xffff_f055);
+    }
+
+    #[test]
+    fn should_execute_udf_1() {
+        let rp = crate::rp2040::Rp2040::new();
+        let breaks = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let recorded = breaks.clone();
+        rp.set_on_break(Box::new(move |code| recorded.borrow_mut().push(code)));
+        rp.core.set_pc(0x2000_0000);
+        rp.write_u16(0x2000_0000, opcode_udf(1));
+        rp.step();
+        assert_eq!(rp.core.pc(), 0x2000_0002);
+        assert_eq!(*breaks.borrow(), vec![1]);
+    }
+
+    #[test]
+    fn should_execute_udf_w_zero() {
+        let rp = crate::rp2040::Rp2040::new();
+        let breaks = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let recorded = breaks.clone();
+        rp.set_on_break(Box::new(move |code| recorded.borrow_mut().push(code)));
+        rp.core.set_pc(0x2000_0000);
+        rp.write_u32(0x2000_0000, opcode_udf2(0));
+        rp.step();
+        assert_eq!(rp.core.pc(), 0x2000_0004);
+        assert_eq!(*breaks.borrow(), vec![0]);
+    }
+
+    #[test]
+    fn should_execute_lsls_r5_r5_18() {
+        let cpu = driver();
+        cpu.set_registers(&[(5, 0x1234_5678)]);
+        cpu.write_u16(0x2000_0000, opcode_lsls_imm(5, 5, 18));
+        cpu.single_step();
+        let r = cpu.read_registers();
+        assert_eq!(r.r5, 0x1234_5678u32.wrapping_shl(18));
+        assert_eq!(r.pc, 0x2000_0002);
     }
 }

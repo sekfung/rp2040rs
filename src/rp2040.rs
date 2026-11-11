@@ -101,6 +101,7 @@ pub struct BoardShared {
     pub logger: Box<dyn Logger>,
     pub peripherals: BTreeMap<u32, Rc<dyn Peripheral>>,
     pub ppb: Option<Ppb>,
+    pub on_break: Option<Box<dyn FnMut(u32)>>,
     pub bootrom: Memory,
     pub sram: Memory,
     pub flash: Memory,
@@ -128,6 +129,7 @@ impl Rp2040 {
             logger: Box::new(ConsoleLogger::new(LogLevel::Debug, true)),
             peripherals: BTreeMap::new(),
             ppb: None,
+            on_break: None,
             bootrom: bootrom.clone(),
             sram: sram.clone(),
             flash: flash.clone(),
@@ -212,6 +214,10 @@ impl Rp2040 {
 
     pub fn set_logger(&self, logger: Box<dyn Logger>) {
         self.shared.borrow_mut().logger = logger;
+    }
+
+    pub fn set_on_break(&self, callback: Box<dyn FnMut(u32)>) {
+        self.shared.borrow_mut().on_break = Some(callback);
     }
 
     pub fn set_peripheral(&self, key: u32, peripheral: Rc<dyn Peripheral>) {
