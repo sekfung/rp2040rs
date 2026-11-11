@@ -1,4 +1,5 @@
 pub mod clocks;
+pub mod dma;
 pub mod peripheral;
 pub mod pll;
 pub mod ppb;
@@ -7,6 +8,7 @@ pub mod uart;
 pub mod xosc;
 
 pub use clocks::Clocks;
+pub use dma::{Dma, DreqChannel};
 pub use peripheral::{atomic_update, BasePeripheral, Peripheral};
 pub use pll::Pll;
 pub use ppb::Ppb;

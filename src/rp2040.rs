@@ -2,9 +2,11 @@ use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::rc::Rc;
 
+use crate::clock::{Clock, SimulationClock};
 use crate::cortex_m0_core::Core;
 use crate::gpio_pin::GpioPin;
 use crate::peripherals::clocks::Clocks;
+use crate::peripherals::dma::Dma;
 use crate::peripherals::pll::Pll;
 use crate::peripherals::ppb::Ppb;
 use crate::peripherals::pwm::Pwm;
@@ -109,6 +111,8 @@ impl Memory {
 }
 
 pub struct BoardShared {
+    pub clock: Rc<dyn Clock>,
+    pub core: Core,
     pub logger: Rc<RefCell<Box<dyn Logger>>>,
     pub peripherals: BTreeMap<u32, Rc<dyn Peripheral>>,
     pub ppb: Option<Ppb>,
@@ -130,6 +134,7 @@ pub struct BoardShared {
     pub pwm: Option<Pwm>,
     pub uart: [Option<Uart>; 2],
     pub sio: Option<Sio>,
+    pub dma: Option<Dma>,
     pub gpio: [GpioPin; 30],
     pub qspi: [GpioPin; 6],
 }
@@ -137,6 +142,7 @@ pub struct BoardShared {
 #[derive(Clone)]
 pub struct Rp2040 {
     shared: Rc<RefCell<BoardShared>>,
+    pub clock: Rc<dyn Clock>,
     pub core: Core,
     pub ppb: Ppb,
     pub bootrom: Memory,
@@ -150,47 +156,57 @@ pub struct Rp2040 {
     pub pwm: Pwm,
     pub uart: [Uart; 2],
     pub sio: Sio,
+    pub dma: Dma,
     pub gpio: [GpioPin; 30],
     pub qspi: [GpioPin; 6],
 }
 
 impl Rp2040 {
     pub fn new() -> Self {
+        Self::with_clock(Rc::new(SimulationClock::new()))
+    }
+
+    pub fn with_clock(clock: Rc<dyn Clock>) -> Self {
         let bootrom = Memory::new(BOOTROM_SIZE);
         let sram = Memory::new(SRAM_SIZE);
         let flash = Memory::new(FLASH_SIZE);
         let usb_dpram = Memory::new(USB_DPRAM_SIZE);
         let gpio = std::array::from_fn(GpioPin::new);
         let qspi = std::array::from_fn(GpioPin::new);
-        let shared = Rc::new(RefCell::new(BoardShared {
-            logger: Rc::new(RefCell::new(Box::new(ConsoleLogger::new(
-                LogLevel::Debug,
-                true,
-            )))),
-            peripherals: BTreeMap::new(),
-            ppb: None,
-            on_break: None,
-            bootrom: bootrom.clone(),
-            sram: sram.clone(),
-            flash: flash.clone(),
-            usb_dpram: usb_dpram.clone(),
-            xosc_freq: 12_000_000.0,
-            rosc_freq: 6_500_000.0,
-            clk_sys: 125_000_000.0,
-            clk_peri: 125_000_000.0,
-            clock_listeners: BTreeMap::new(),
-            next_clock_listener_id: 0,
-            clocks: None,
-            pll_sys: None,
-            pll_usb: None,
-            xosc: None,
-            pwm: None,
-            uart: [None, None],
-            sio: None,
-            gpio: gpio.clone(),
-            qspi: qspi.clone(),
-        }));
-        let core = Core::new(Rc::downgrade(&shared));
+        let shared = Rc::new_cyclic(|weak| {
+            RefCell::new(BoardShared {
+                clock: clock.clone(),
+                core: Core::new(weak.clone()),
+                logger: Rc::new(RefCell::new(Box::new(ConsoleLogger::new(
+                    LogLevel::Debug,
+                    true,
+                )))),
+                peripherals: BTreeMap::new(),
+                ppb: None,
+                on_break: None,
+                bootrom: bootrom.clone(),
+                sram: sram.clone(),
+                flash: flash.clone(),
+                usb_dpram: usb_dpram.clone(),
+                xosc_freq: 12_000_000.0,
+                rosc_freq: 6_500_000.0,
+                clk_sys: 125_000_000.0,
+                clk_peri: 125_000_000.0,
+                clock_listeners: BTreeMap::new(),
+                next_clock_listener_id: 0,
+                clocks: None,
+                pll_sys: None,
+                pll_usb: None,
+                xosc: None,
+                pwm: None,
+                uart: [None, None],
+                sio: None,
+                dma: None,
+                gpio: gpio.clone(),
+                qspi: qspi.clone(),
+            })
+        });
+        let core = shared.borrow().core.clone();
         let ppb = Ppb::new(core.clone());
         let weak = Rc::downgrade(&shared);
         let clocks = Clocks::new("CLOCKS_BASE", weak.clone());
@@ -203,6 +219,7 @@ impl Rp2040 {
             Uart::new("UART1", weak.clone()),
         ];
         let sio = Sio::new(core.clone(), weak.clone());
+        let dma = Dma::new(weak.clone());
         {
             let mut board = shared.borrow_mut();
             board.ppb = Some(ppb.clone());
@@ -213,9 +230,11 @@ impl Rp2040 {
             board.pwm = Some(pwm.clone());
             board.uart = [Some(uart[0].clone()), Some(uart[1].clone())];
             board.sio = Some(sio.clone());
+            board.dma = Some(dma.clone());
         }
         let rp2040 = Self {
             shared: shared.clone(),
+            clock,
             core,
             ppb,
             bootrom,
@@ -229,6 +248,7 @@ impl Rp2040 {
             pwm,
             uart,
             sio,
+            dma,
             gpio,
             qspi,
         };
@@ -294,6 +314,7 @@ impl Rp2040 {
         }
         self.set_peripheral(0x40034, Rc::new(self.uart[0].clone()));
         self.set_peripheral(0x40038, Rc::new(self.uart[1].clone()));
+        self.set_peripheral(0x50000, Rc::new(self.dma.clone()));
     }
 
     pub fn reset(&self) {
