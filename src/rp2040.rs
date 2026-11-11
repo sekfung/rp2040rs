@@ -100,7 +100,6 @@ impl Memory {
 pub struct BoardShared {
     pub logger: Box<dyn Logger>,
     pub peripherals: BTreeMap<u32, Rc<dyn Peripheral>>,
-    pub core: Option<Core>,
     pub ppb: Option<Ppb>,
     pub bootrom: Memory,
     pub sram: Memory,
@@ -128,7 +127,6 @@ impl Rp2040 {
         let shared = Rc::new(RefCell::new(BoardShared {
             logger: Box::new(ConsoleLogger::new(LogLevel::Debug, true)),
             peripherals: BTreeMap::new(),
-            core: None,
             ppb: None,
             bootrom: bootrom.clone(),
             sram: sram.clone(),
@@ -139,7 +137,6 @@ impl Rp2040 {
         let ppb = Ppb::new(core.clone());
         {
             let mut board = shared.borrow_mut();
-            board.core = Some(core.clone());
             board.ppb = Some(ppb.clone());
         }
         let rp2040 = Self {
@@ -193,7 +190,8 @@ impl Rp2040 {
             (0x50300, "PIO1"),
         ];
         for (key, name) in entries {
-            let peripheral: Rc<dyn Peripheral> = Rc::new(BasePeripheral::new(name, board.clone()));
+            let peripheral: Rc<dyn Peripheral> =
+                Rc::new(BasePeripheral::with_board(name, board.clone()));
             self.shared.borrow_mut().peripherals.insert(key, peripheral);
         }
     }
@@ -268,6 +266,11 @@ impl Bus {
         board.logger.warn("RP2040", message);
     }
 
+    fn error(&self, message: &str) {
+        let board = self.0.borrow();
+        board.logger.error("RP2040", message);
+    }
+
     fn find_peripheral(&self, address: u32) -> Option<Rc<dyn Peripheral>> {
         let key = (address >> 14) << 2;
         self.0.borrow().peripherals.get(&key).cloned()
@@ -275,7 +278,7 @@ impl Bus {
 
     pub(crate) fn read_u32(&self, address: u32) -> u32 {
         if address & 0x3 != 0 {
-            self.warn(&format!(
+            self.error(&format!(
                 "read from address {address:x}, which is not 32 bit aligned"
             ));
         }

@@ -31,7 +31,11 @@ pub struct BasePeripheral {
 }
 
 impl BasePeripheral {
-    pub fn new(name: impl Into<String>, board: Weak<RefCell<BoardShared>>) -> Self {
+    pub fn new(name: impl Into<String>) -> Self {
+        Self::with_board(name, Weak::new())
+    }
+
+    pub fn with_board(name: impl Into<String>, board: Weak<RefCell<BoardShared>>) -> Self {
         Self {
             name: name.into(),
             board,

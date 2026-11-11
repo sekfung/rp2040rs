@@ -47,6 +47,10 @@ pub struct CoreState {
     pub(crate) enabled_interrupts: u32,
     pub(crate) interrupt_priorities: [u32; 4],
     pub(crate) interrupts_updated: bool,
+    pub(crate) pending_nmi: bool,
+    pub(crate) pending_pendsv: bool,
+    pub(crate) pending_svc: bool,
+    pub(crate) pending_systick: bool,
     pub(crate) vtor: u32,
     pub(crate) shpr2: u32,
     pub(crate) shpr3: u32,
@@ -73,6 +77,10 @@ impl CoreState {
             enabled_interrupts: 0,
             interrupt_priorities: [0xffff_ffff, 0, 0, 0],
             interrupts_updated: false,
+            pending_nmi: false,
+            pending_pendsv: false,
+            pending_svc: false,
+            pending_systick: false,
             vtor: 0,
             shpr2: 0,
             shpr3: 0,
@@ -105,9 +113,12 @@ impl Core {
         let Some(bus) = self.bus() else {
             return;
         };
+        let vtor = self.state.borrow().vtor;
+        let sp = bus.read_u32(vtor) & !0x3;
+        let pc = bus.read_u32(vtor.wrapping_add(4)) & 0xffff_fffe;
         let mut state = self.state.borrow_mut();
-        state.registers[13] = bus.read_u32(state.vtor) & !0x3;
-        state.registers[15] = bus.read_u32(state.vtor.wrapping_add(4)) & 0xffff_fffe;
+        state.registers[13] = sp;
+        state.registers[15] = pc;
         state.cycles = 0;
     }
 
@@ -124,10 +135,48 @@ impl Core {
     }
 
     pub fn set_sp(&self, value: u32) {
+        self.state.borrow_mut().registers[13] = value & !0x3;
+    }
+
+    pub fn msp(&self) -> u32 {
+        let state = self.state.borrow();
+        match state.spsel {
+            StackPointerBank::Main => state.registers[13],
+            StackPointerBank::Process => state.banked_sp,
+        }
+    }
+
+    pub fn psp(&self) -> u32 {
+        let state = self.state.borrow();
+        match state.spsel {
+            StackPointerBank::Process => state.registers[13],
+            StackPointerBank::Main => state.banked_sp,
+        }
+    }
+
+    pub fn set_msp(&self, value: u32) {
         let mut state = self.state.borrow_mut();
         match state.spsel {
             StackPointerBank::Main => state.registers[13] = value & !0x3,
             StackPointerBank::Process => state.banked_sp = value & !0x3,
+        }
+    }
+
+    pub fn set_psp(&self, value: u32) {
+        let mut state = self.state.borrow_mut();
+        match state.spsel {
+            StackPointerBank::Process => state.registers[13] = value & !0x3,
+            StackPointerBank::Main => state.banked_sp = value & !0x3,
+        }
+    }
+
+    fn switch_stack(&self, stack: StackPointerBank) {
+        let mut state = self.state.borrow_mut();
+        if state.spsel != stack {
+            let temp = state.registers[13];
+            state.registers[13] = state.banked_sp;
+            state.banked_sp = temp;
+            state.spsel = stack;
         }
     }
 
@@ -243,6 +292,62 @@ impl Core {
         self.state.borrow_mut().enabled_interrupts = value;
     }
 
+    pub fn pending_nmi(&self) -> bool {
+        self.state.borrow().pending_nmi
+    }
+
+    pub fn set_pending_nmi(&self, value: bool) {
+        self.state.borrow_mut().pending_nmi = value;
+    }
+
+    pub fn pending_pendsv(&self) -> bool {
+        self.state.borrow().pending_pendsv
+    }
+
+    pub fn set_pending_pendsv(&self, value: bool) {
+        self.state.borrow_mut().pending_pendsv = value;
+    }
+
+    pub fn pending_svc(&self) -> bool {
+        self.state.borrow().pending_svc
+    }
+
+    pub fn set_pending_svc(&self, value: bool) {
+        self.state.borrow_mut().pending_svc = value;
+    }
+
+    pub fn pending_systick(&self) -> bool {
+        self.state.borrow().pending_systick
+    }
+
+    pub fn set_pending_systick(&self, value: bool) {
+        self.state.borrow_mut().pending_systick = value;
+    }
+
+    pub fn pm(&self) -> bool {
+        self.state.borrow().pm
+    }
+
+    pub fn set_pm(&self, value: bool) {
+        self.state.borrow_mut().pm = value;
+    }
+
+    pub fn set_spsel(&self, value: StackPointerBank) {
+        self.state.borrow_mut().spsel = value;
+    }
+
+    pub fn spsel(&self) -> StackPointerBank {
+        self.state.borrow().spsel
+    }
+
+    pub fn set_npriv(&self, value: bool) {
+        self.state.borrow_mut().npriv = value;
+    }
+
+    pub fn npriv(&self) -> bool {
+        self.state.borrow().npriv
+    }
+
     pub fn set_interrupts_updated(&self, value: bool) {
         self.state.borrow_mut().interrupts_updated = value;
     }
@@ -282,12 +387,21 @@ impl Core {
 
     pub fn set_interrupt(&self, irq: u32, value: bool) {
         let bit = 1u32.wrapping_shl(irq);
-        let mut state = self.state.borrow_mut();
-        if value && state.pending_interrupts & bit == 0 {
-            state.pending_interrupts |= bit;
-            state.interrupts_updated = true;
-        } else if !value {
-            state.pending_interrupts &= !bit;
+        let should_wake = {
+            let mut state = self.state.borrow_mut();
+            if value && state.pending_interrupts & bit == 0 {
+                state.pending_interrupts |= bit;
+                state.interrupts_updated = true;
+                state.waiting
+            } else {
+                if !value {
+                    state.pending_interrupts &= !bit;
+                }
+                false
+            }
+        };
+        if should_wake && self.check_for_interrupts() {
+            self.state.borrow_mut().waiting = false;
         }
     }
 
@@ -385,18 +499,56 @@ impl Core {
     }
 
     fn check_for_interrupts(&self) -> bool {
-        let (pending, enabled, priorities, ipsr) = {
+        let (pending, enabled, priorities, ipsr, waiting, pm) = {
             let state = self.state.borrow();
             (
                 state.pending_interrupts,
                 state.enabled_interrupts,
                 state.interrupt_priorities,
                 state.ipsr,
+                state.waiting,
+                state.pm,
             )
         };
-        let current_priority = if ipsr < 16 { LOWEST_PRIORITY } else { 4 };
+        let current_priority = if waiting {
+            if pm {
+                self.exception_priority(ipsr)
+            } else {
+                LOWEST_PRIORITY as i32
+            }
+        } else {
+            self.exception_priority(ipsr)
+                .min(if pm { 0 } else { LOWEST_PRIORITY as i32 })
+        };
+        if current_priority <= 0 {
+            self.state.borrow_mut().interrupts_updated = false;
+            return false;
+        }
+        if self.pending_nmi() {
+            self.set_pending_nmi(false);
+            self.exception_entry(2);
+            return true;
+        }
         let interrupt_set = pending & enabled;
-        for priority in 0..current_priority {
+        let svc_priority = self.svc_priority();
+        let pendsv_priority = self.pendsv_priority();
+        let systick_priority = self.systick_priority();
+        for priority in 0..current_priority as u32 {
+            if self.pending_svc() && priority == svc_priority as u32 {
+                self.set_pending_svc(false);
+                self.exception_entry(EXC_SVCALL);
+                return true;
+            }
+            if self.pending_pendsv() && priority == pendsv_priority as u32 {
+                self.set_pending_pendsv(false);
+                self.exception_entry(EXC_PENDSV);
+                return true;
+            }
+            if self.pending_systick() && priority == systick_priority as u32 {
+                self.set_pending_systick(false);
+                self.exception_entry(EXC_SYSTICK);
+                return true;
+            }
             let level = interrupt_set & priorities[priority as usize];
             if level != 0 {
                 for n in 0..32 {
@@ -405,7 +557,6 @@ impl Core {
                             self.state.borrow_mut().pending_interrupts &= !(1 << n);
                         }
                         self.exception_entry(16 + n);
-                        self.state.borrow_mut().interrupts_updated = false;
                         return true;
                     }
                 }
@@ -415,12 +566,89 @@ impl Core {
         false
     }
 
+    fn svc_priority(&self) -> i32 {
+        (self.state.borrow().shpr2 >> 30) as i32
+    }
+
+    fn pendsv_priority(&self) -> i32 {
+        ((self.state.borrow().shpr3 >> 22) & 0x3) as i32
+    }
+
+    fn systick_priority(&self) -> i32 {
+        (self.state.borrow().shpr3 >> 30) as i32
+    }
+
+    pub fn exception_priority(&self, number: u32) -> i32 {
+        match number {
+            1 => -3,
+            2 => -2,
+            3 => -1,
+            EXC_SVCALL => self.svc_priority(),
+            EXC_PENDSV => self.pendsv_priority(),
+            EXC_SYSTICK => self.systick_priority(),
+            n if n < 16 => LOWEST_PRIORITY as i32,
+            n => {
+                let int_num = n - 16;
+                let priorities = self.state.borrow().interrupt_priorities;
+                for (priority, bits) in priorities.iter().enumerate() {
+                    if bits & (1 << int_num) != 0 {
+                        return priority as i32;
+                    }
+                }
+                LOWEST_PRIORITY as i32
+            }
+        }
+    }
+
+    pub fn vect_pending(&self) -> u32 {
+        if self.pending_nmi() {
+            return 2;
+        }
+        let pending = self.state.borrow().pending_interrupts;
+        let priorities = self.state.borrow().interrupt_priorities;
+        let svc_priority = self.svc_priority();
+        let pendsv_priority = self.pendsv_priority();
+        let systick_priority = self.systick_priority();
+        for priority in 0..LOWEST_PRIORITY {
+            if self.pending_svc() && priority == svc_priority as u32 {
+                return EXC_SVCALL;
+            }
+            if self.pending_pendsv() && priority == pendsv_priority as u32 {
+                return EXC_PENDSV;
+            }
+            if self.pending_systick() && priority == systick_priority as u32 {
+                return EXC_SYSTICK;
+            }
+            let level = pending & priorities[priority as usize];
+            if level != 0 {
+                for n in 0..32 {
+                    if level & (1 << n) != 0 {
+                        return 16 + n;
+                    }
+                }
+            }
+        }
+        0
+    }
+
     fn exception_entry(&self, exception_number: u32) {
         let Some(bus) = self.bus() else {
             return;
         };
-        let frame_align = u32::from(self.sp() & 0b100 != 0);
-        let frame_ptr = self.sp().wrapping_sub(0x20) & !0b100;
+        let (current_mode, spsel) = {
+            let state = self.state.borrow();
+            (state.current_mode, state.spsel)
+        };
+        let use_process =
+            current_mode == ExecutionMode::Thread && spsel == StackPointerBank::Process;
+        let stack_pointer = if use_process { self.psp() } else { self.msp() };
+        let frame_align = u32::from(stack_pointer & 0b100 != 0);
+        let frame_ptr = stack_pointer.wrapping_sub(0x20) & !0b100;
+        if use_process {
+            self.set_psp(frame_ptr);
+        } else {
+            self.set_msp(frame_ptr);
+        }
         let xpsr = self.xpsr();
         let lr = self.lr();
         let pc = self.pc();
@@ -436,19 +664,18 @@ impl Core {
             (xpsr & !(1 << 9)) | (frame_align << 9),
         );
         let mut state = self.state.borrow_mut();
-        state.registers[13] = frame_ptr;
-        state.registers[14] = if state.current_mode == ExecutionMode::Handler {
+        state.registers[14] = if current_mode == ExecutionMode::Handler {
             0xffff_fff1
-        } else if state.spsel == StackPointerBank::Main {
+        } else if spsel == StackPointerBank::Main {
             0xffff_fff9
         } else {
             0xffff_fffd
         };
         state.current_mode = ExecutionMode::Handler;
         state.ipsr = exception_number;
-        state.spsel = StackPointerBank::Main;
         let vector = state.vtor;
         drop(state);
+        self.switch_stack(StackPointerBank::Main);
         self.set_pc(bus.read_u32(vector.wrapping_add(4 * exception_number)));
     }
 
@@ -456,7 +683,11 @@ impl Core {
         let Some(bus) = self.bus() else {
             return;
         };
-        let frame_ptr = self.sp();
+        let frame_ptr = if exc_return & 0xf == 0b1101 {
+            self.psp()
+        } else {
+            self.msp()
+        };
         self.set_reg(0, bus.read_u32(frame_ptr));
         self.set_reg(1, bus.read_u32(frame_ptr.wrapping_add(4)));
         self.set_reg(2, bus.read_u32(frame_ptr.wrapping_add(8)));
@@ -466,27 +697,31 @@ impl Core {
         self.set_pc(bus.read_u32(frame_ptr.wrapping_add(24)));
         let psr = bus.read_u32(frame_ptr.wrapping_add(28));
         let frame_align = if psr & (1 << 9) != 0 { 0b100 } else { 0 };
-        let mut state = self.state.borrow_mut();
         match exc_return & 0xf {
             0b0001 => {
-                state.current_mode = ExecutionMode::Handler;
-                state.registers[13] = (state.registers[13].wrapping_add(0x20)) | frame_align;
+                self.state.borrow_mut().current_mode = ExecutionMode::Handler;
+                self.switch_stack(StackPointerBank::Main);
+                self.set_sp((frame_ptr.wrapping_add(0x20)) | frame_align);
             }
             0b1001 => {
-                state.current_mode = ExecutionMode::Thread;
-                state.registers[13] = (state.registers[13].wrapping_add(0x20)) | frame_align;
+                self.state.borrow_mut().current_mode = ExecutionMode::Thread;
+                self.switch_stack(StackPointerBank::Main);
+                self.set_sp((frame_ptr.wrapping_add(0x20)) | frame_align);
             }
             0b1101 => {
-                state.current_mode = ExecutionMode::Thread;
-                state.registers[13] = (state.banked_sp.wrapping_add(0x20)) | frame_align;
+                self.state.borrow_mut().current_mode = ExecutionMode::Thread;
+                self.switch_stack(StackPointerBank::Process);
+                self.set_sp((frame_ptr.wrapping_add(0x20)) | frame_align);
             }
             _ => {}
         }
+        let mut state = self.state.borrow_mut();
         state.n = psr & 0x8000_0000 != 0;
         state.z = psr & 0x4000_0000 != 0;
         state.c = psr & 0x2000_0000 != 0;
         state.v = psr & 0x1000_0000 != 0;
-        state.ipsr = psr & 0x3f;
+        let force_thread = state.current_mode == ExecutionMode::Thread && state.npriv;
+        state.ipsr = if force_thread { 0 } else { psr & 0x3f };
         state.interrupts_updated = true;
     }
 
@@ -495,13 +730,13 @@ impl Core {
             SYSM_APSR => self.apsr(),
             SYSM_XPSR => self.xpsr(),
             SYSM_IPSR => self.ipsr(),
-            SYSM_MSP => self.state.borrow().registers[13],
-            SYSM_PSP => self.state.borrow().banked_sp,
-            SYSM_PRIMASK => u32::from(self.state.borrow().pm),
+            SYSM_MSP => self.msp(),
+            SYSM_PSP => self.psp(),
+            SYSM_PRIMASK => u32::from(self.pm()),
             SYSM_CONTROL => {
                 let state = self.state.borrow();
-                (u32::from(state.spsel == StackPointerBank::Process))
-                    | (u32::from(state.npriv) << 1)
+                (u32::from(state.npriv))
+                    | (u32::from(state.spsel == StackPointerBank::Process) << 1)
             }
             _ => 0,
         }
@@ -512,17 +747,22 @@ impl Core {
             SYSM_APSR => self.set_apsr(value),
             SYSM_XPSR => self.set_xpsr(value),
             SYSM_IPSR => self.set_ipsr(value),
-            SYSM_MSP => self.state.borrow_mut().registers[13] = value & !0x3,
-            SYSM_PSP => self.state.borrow_mut().banked_sp = value & !0x3,
-            SYSM_PRIMASK => self.state.borrow_mut().pm = value & 1 != 0,
+            SYSM_MSP => self.set_msp(value),
+            SYSM_PSP => self.set_psp(value),
+            SYSM_PRIMASK => {
+                self.state.borrow_mut().pm = value & 1 != 0;
+                self.state.borrow_mut().interrupts_updated = true;
+            }
             SYSM_CONTROL => {
-                let mut state = self.state.borrow_mut();
-                state.spsel = if value & 1 != 0 {
-                    StackPointerBank::Process
-                } else {
-                    StackPointerBank::Main
-                };
-                state.npriv = value & 2 != 0;
+                self.state.borrow_mut().npriv = value & 1 != 0;
+                let current_mode = self.state.borrow().current_mode;
+                if current_mode == ExecutionMode::Thread {
+                    self.switch_stack(if value & 2 != 0 {
+                        StackPointerBank::Process
+                    } else {
+                        StackPointerBank::Main
+                    });
+                }
             }
             _ => {}
         }
