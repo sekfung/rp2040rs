@@ -4,6 +4,7 @@ use std::rc::Rc;
 use crate::cortex_m0_core::Core;
 use crate::irq::MAX_HARDWARE_IRQ;
 use crate::peripherals::peripheral::{atomic_update, Peripheral};
+use crate::utils::Timer32;
 
 const CPUID: u32 = 0xd00;
 const ICSR: u32 = 0xd04;
@@ -44,6 +45,7 @@ pub struct Ppb {
     core: Core,
     name: String,
     state: Rc<RefCell<PpbState>>,
+    pub systick_timer: Timer32,
 }
 
 impl Ppb {
@@ -57,6 +59,7 @@ impl Ppb {
                 systick_cvr: 0x00ff_ffff,
                 systick_count_flag: false,
             })),
+            systick_timer: Timer32::new(125_000_000.0),
         }
     }
 

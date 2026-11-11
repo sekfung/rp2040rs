@@ -3,7 +3,12 @@ use std::collections::BTreeMap;
 use std::rc::Rc;
 
 use crate::cortex_m0_core::Core;
+use crate::peripherals::clocks::Clocks;
+use crate::peripherals::pll::Pll;
 use crate::peripherals::ppb::Ppb;
+use crate::peripherals::pwm::Pwm;
+use crate::peripherals::uart::Uart;
+use crate::peripherals::xosc::Xosc;
 use crate::peripherals::{BasePeripheral, Peripheral};
 use crate::utils::logging::{ConsoleLogger, LogLevel, Logger};
 
@@ -106,6 +111,18 @@ pub struct BoardShared {
     pub sram: Memory,
     pub flash: Memory,
     pub usb_dpram: Memory,
+    pub xosc_freq: f64,
+    pub rosc_freq: f64,
+    pub clk_sys: f64,
+    pub clk_peri: f64,
+    pub clock_listeners: BTreeMap<u64, Box<dyn FnMut(f64, f64)>>,
+    pub next_clock_listener_id: u64,
+    pub clocks: Option<Clocks>,
+    pub pll_sys: Option<Pll>,
+    pub pll_usb: Option<Pll>,
+    pub xosc: Option<Xosc>,
+    pub pwm: Option<Pwm>,
+    pub uart: [Option<Uart>; 2],
 }
 
 #[derive(Clone)]
@@ -117,6 +134,12 @@ pub struct Rp2040 {
     pub sram: Memory,
     pub flash: Memory,
     pub usb_dpram: Memory,
+    pub clocks: Clocks,
+    pub pll_sys: Pll,
+    pub pll_usb: Pll,
+    pub xosc: Xosc,
+    pub pwm: Pwm,
+    pub uart: [Uart; 2],
 }
 
 impl Rp2040 {
@@ -137,12 +160,40 @@ impl Rp2040 {
             sram: sram.clone(),
             flash: flash.clone(),
             usb_dpram: usb_dpram.clone(),
+            xosc_freq: 12_000_000.0,
+            rosc_freq: 6_500_000.0,
+            clk_sys: 125_000_000.0,
+            clk_peri: 125_000_000.0,
+            clock_listeners: BTreeMap::new(),
+            next_clock_listener_id: 0,
+            clocks: None,
+            pll_sys: None,
+            pll_usb: None,
+            xosc: None,
+            pwm: None,
+            uart: [None, None],
         }));
         let core = Core::new(Rc::downgrade(&shared));
         let ppb = Ppb::new(core.clone());
+        let weak = Rc::downgrade(&shared);
+        let clocks = Clocks::new("CLOCKS_BASE", weak.clone());
+        let pll_sys = Pll::new("PLL_SYS_BASE", weak.clone());
+        let pll_usb = Pll::new("PLL_USB_BASE", weak.clone());
+        let xosc = Xosc::new("XOSC_BASE", weak.clone());
+        let pwm = Pwm::new("PWM_BASE", weak.clone());
+        let uart = [
+            Uart::new("UART0", weak.clone()),
+            Uart::new("UART1", weak.clone()),
+        ];
         {
             let mut board = shared.borrow_mut();
             board.ppb = Some(ppb.clone());
+            board.clocks = Some(clocks.clone());
+            board.pll_sys = Some(pll_sys.clone());
+            board.pll_usb = Some(pll_usb.clone());
+            board.xosc = Some(xosc.clone());
+            board.pwm = Some(pwm.clone());
+            board.uart = [Some(uart[0].clone()), Some(uart[1].clone())];
         }
         let rp2040 = Self {
             shared: shared.clone(),
@@ -152,8 +203,15 @@ impl Rp2040 {
             sram,
             flash,
             usb_dpram,
+            clocks,
+            pll_sys,
+            pll_usb,
+            xosc,
+            pwm,
+            uart,
         };
         rp2040.register_stubs();
+        rp2040.register_real_peripherals();
         rp2040.reset();
         rp2040
     }
@@ -201,6 +259,21 @@ impl Rp2040 {
         }
     }
 
+    fn register_real_peripherals(&self) {
+        let entries: [(u32, Rc<dyn Peripheral>); 5] = [
+            (0x40008, Rc::new(self.clocks.clone())),
+            (0x40024, Rc::new(self.xosc.clone())),
+            (0x40028, Rc::new(self.pll_sys.clone())),
+            (0x4002c, Rc::new(self.pll_usb.clone())),
+            (0x40050, Rc::new(self.pwm.clone())),
+        ];
+        for (key, peripheral) in entries {
+            self.set_peripheral(key, peripheral);
+        }
+        self.set_peripheral(0x40034, Rc::new(self.uart[0].clone()));
+        self.set_peripheral(0x40038, Rc::new(self.uart[1].clone()));
+    }
+
     pub fn reset(&self) {
         self.core.reset();
         self.flash.fill(0xff);
@@ -226,6 +299,44 @@ impl Rp2040 {
 
     pub fn set_peripheral(&self, key: u32, peripheral: Rc<dyn Peripheral>) {
         self.shared.borrow_mut().peripherals.insert(key, peripheral);
+    }
+
+    pub fn clk_sys(&self) -> f64 {
+        self.shared.borrow().clk_sys
+    }
+
+    pub fn clk_peri(&self) -> f64 {
+        self.shared.borrow().clk_peri
+    }
+
+    pub fn set_xosc_freq(&self, frequency: f64) {
+        self.shared.borrow_mut().xosc_freq = frequency;
+        self.update_clocks();
+    }
+
+    pub fn set_rosc_freq(&self, frequency: f64) {
+        self.shared.borrow_mut().rosc_freq = frequency;
+        self.update_clocks();
+    }
+
+    pub fn add_clock_listener(&self, listener: Box<dyn FnMut(f64, f64)>) -> u64 {
+        let mut board = self.shared.borrow_mut();
+        let id = board.next_clock_listener_id;
+        board.next_clock_listener_id += 1;
+        board.clock_listeners.insert(id, listener);
+        id
+    }
+
+    pub fn remove_clock_listener(&self, id: u64) -> bool {
+        self.shared
+            .borrow_mut()
+            .clock_listeners
+            .remove(&id)
+            .is_some()
+    }
+
+    pub fn update_clocks(&self) {
+        update_clocks(&self.shared);
     }
 
     pub fn read_u32(&self, address: u32) -> u32 {
@@ -264,6 +375,69 @@ impl Rp2040 {
 impl Default for Rp2040 {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+pub(crate) fn update_clocks(shared: &Rc<RefCell<BoardShared>>) {
+    let (clocks, pll_sys, pll_usb, pwm, uart, xosc_freq, rosc_freq, old_sys, old_peri, ppb) = {
+        let board = shared.borrow();
+        (
+            board.clocks.clone(),
+            board.pll_sys.clone(),
+            board.pll_usb.clone(),
+            board.pwm.clone(),
+            board.uart.clone(),
+            board.xosc_freq,
+            board.rosc_freq,
+            board.clk_sys,
+            board.clk_peri,
+            board.ppb.clone(),
+        )
+    };
+    let Some(clocks) = clocks else {
+        return;
+    };
+    let pll_sys_freq = pll_sys
+        .as_ref()
+        .map(|pll| pll.frequency_from(xosc_freq))
+        .unwrap_or(0.0);
+    let pll_usb_freq = pll_usb
+        .as_ref()
+        .map(|pll| pll.frequency_from(xosc_freq))
+        .unwrap_or(0.0);
+    let sys_freq = clocks.sys_freq(xosc_freq, rosc_freq, pll_sys_freq, pll_usb_freq);
+    let peri_freq = clocks.peri_freq(xosc_freq, rosc_freq, pll_sys_freq, pll_usb_freq);
+
+    let sys_changed = sys_freq != 0.0 && sys_freq != old_sys;
+    if sys_changed {
+        let mut listeners = {
+            let mut board = shared.borrow_mut();
+            board.clk_sys = sys_freq;
+            std::mem::take(&mut board.clock_listeners)
+                .into_iter()
+                .collect::<Vec<_>>()
+        };
+        if let Some(ppb) = ppb {
+            ppb.systick_timer.set_frequency(sys_freq);
+        }
+        if let Some(pwm) = pwm.clone() {
+            pwm.set_clock_freq(sys_freq);
+        }
+        for (_, listener) in listeners.iter_mut() {
+            listener(sys_freq, old_sys);
+        }
+        let mut board = shared.borrow_mut();
+        for (id, listener) in listeners {
+            board.clock_listeners.entry(id).or_insert(listener);
+        }
+    }
+
+    let peri_changed = peri_freq != 0.0 && peri_freq != old_peri;
+    if peri_changed {
+        shared.borrow_mut().clk_peri = peri_freq;
+        for uart in uart.into_iter().flatten() {
+            uart.clk_peri_changed(peri_freq);
+        }
     }
 }
 
