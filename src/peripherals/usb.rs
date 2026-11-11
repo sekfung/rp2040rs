@@ -603,10 +603,7 @@ fn generate_sof(state: &Rc<RefCell<UsbState>>, board: &Weak<RefCell<BoardShared>
     }
 }
 
-fn complete_host_transaction(
-    state: &Rc<RefCell<UsbState>>,
-    board: &Weak<RefCell<BoardShared>>,
-) {
+fn complete_host_transaction(state: &Rc<RefCell<UsbState>>, board: &Weak<RefCell<BoardShared>>) {
     {
         let mut state = state.borrow_mut();
         if state.connected_device {

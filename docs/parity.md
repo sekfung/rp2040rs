@@ -142,14 +142,13 @@ The per-file figures above are expanded vitest counts, not counts of textual
   host SIE_STATUS/interrupt mapping and device-connected events. Full USBDevice
   packet-level host transaction modeling and all 12 device SIE mappings remain
   simplified; device-mode CDC/controller paths are implemented.
-- PWM polarity inversion, `DIVMODE` gating, phase-correct/ZigZag counting, and
-  compare-output edges are implemented; free-running counter, `CHn_DIV`, double
-  buffering, wrap DREQ, and GPIO A/B output are implemented.
+- PWM polarity inversion, `DIVMODE` gating, phase-correct/ZigZag counting,
+  free-running counter, `CHn_DIV`, double buffering, wrap DREQ, and GPIO A/B
+  output are implemented. Phase-correct compare-output edge cases remain
+  approximate and are not covered by the upstream 322-case suite.
 - UART modem/flow-control, FIFO thresholds, and overrun/error flags remain
   simplified; the full data/status/control/interrupt/identity register set,
   RX FIFO, line buffering, and TX/RX callbacks are implemented.
-- TIMER ALARM writes use raw values rather than atomic aliases; normal writes
-  are implemented.
 - SIO initial divisor matches upstream's 1; INTERP0/INTERP1 are implemented.
   SIO signed division uses hardware wrapping semantics (`i32::MIN / -1`
   wraps, remainder 0), while upstream JavaScript returns the non-wrapped
