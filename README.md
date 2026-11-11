@@ -20,9 +20,11 @@ The library now ports the complete upstream unit-test suite: 322 tests
 83). See `docs/parity.md` for the per-file mapping and documented source-level
 deviations.
 
-Plan 4 still adds the GDB server, Simulator, CLI, and the upstream peripherals
+Plan 4 still adds the GDB server, Simulator, CLI, the upstream peripherals
 that have no unit tests (ADC, I2C, SPI, SSI, RTC, Watchdog, RESETS, PSM, PADS,
-IO, Interpolator, and host-mode USB).
+IO, BUSCTRL, SYSINFO, SYSCFG, TBMAN, Interpolator), host-mode USB, PWM
+output/direction propagation to GPIO, and the full UART register set
+(`UARTDR`/`FR`/`CR`/`IMSC`/`RIS`/`MIS`/`ICR` plus identity registers).
 
 ## License
 

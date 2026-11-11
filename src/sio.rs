@@ -64,7 +64,10 @@ impl Sio {
         Self {
             core,
             board,
-            state: Rc::new(RefCell::new(SioState::default())),
+            state: Rc::new(RefCell::new(SioState {
+                div_divisor: 1,
+                ..SioState::default()
+            })),
         }
     }
 
@@ -127,9 +130,11 @@ impl Sio {
             let quotient = if dividend_value > 0 { 0xffff_ffff } else { 1 };
             (quotient, dividend)
         } else if signed {
+            let dividend = dividend as i32;
+            let divisor = divisor as i32;
             (
-                ((dividend as i32) / (divisor as i32)) as u32,
-                ((dividend as i32) % (divisor as i32)) as u32,
+                dividend.wrapping_div(divisor) as u32,
+                dividend.wrapping_rem(divisor) as u32,
             )
         } else {
             (dividend / divisor, dividend % divisor)

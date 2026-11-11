@@ -101,17 +101,26 @@ The per-file figures above are expanded vitest counts, not counts of textual
 - PIO `FJOIN_RX/TX` semantics and `SM_CLKDIV`/`CLKDIV_RESTART` pacing are not
   implemented; upstream has the same gaps and no ported test asserts them.
 - PIO DMA DREQ signaling and the full GPIO pad/function model are deferred to
-  Plan 4; PIO-driven input values are propagated.
+  Plan 4; PIO-driven input values are propagated. Plan 4 also owns PWM
+  output/direction propagation to GPIO (upstream `gpioValue`/`gpioDirection`
+  via `setA`/`setB`, function select 4).
 - USB host-mode SOF/host-transaction alarms, host SIE_STATUS mapping, and host
   device-connected events are deferred to Plan 4; device-mode CDC is covered.
+  Device-mode SIE interrupt mapping currently covers 4 of upstream's 12 SIE
+  bits and must be completed with the host/SIE work.
 - PWM `CHn_DIV` timing, CTR free-running, TOP/CC double buffering, and wrap
-  DREQ are deferred; the ported phase/wrap cases are covered.
-- Full UART interrupt/line-buffer registers and callbacks are deferred; word
-  length, baud, and `clk_peri` retuning are implemented.
+  DREQ are deferred; the ported phase/wrap cases are covered. PWM GPIO
+  output/direction propagation is a named Plan 4 task.
+- Full UART register set (`UARTDR`, `UARTFR`, `UARTCR`, `UARTIMSC`,
+  `UARTRIS`, `UARTMIS`, `UARTICR`, identity registers) and line-buffer
+  callbacks are deferred to Plan 4; word length, baud, and `clk_peri`
+  retuning are implemented.
 - TIMER ALARM writes use raw values rather than atomic aliases; normal writes
   are implemented.
-- SIO initial divisor is 0 rather than upstream's 1, and INTERP0/INTERP1 are
-  Plan 4 stubs; the 11 SIO tests cover divider/spinlock behavior.
+- SIO initial divisor matches upstream's 1; INTERP0/INTERP1 remain Plan 4
+  stubs. SIO signed division uses hardware wrapping semantics (`i32::MIN /
+  -1` wraps, remainder 0), while upstream JavaScript returns the
+  non-wrapped numeric result for that overflow pair.
 - TREQ_TIMER3 uses hardware-correct bits 16-31; upstream's 36-bit shift is a
   source-level bug and is not copied.
 - `set_logger` called from inside a logger callback is unsupported.
