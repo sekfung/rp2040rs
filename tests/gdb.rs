@@ -63,6 +63,38 @@ fn steps_continues_and_reports_break() {
 }
 
 #[test]
+fn continue_without_break_does_not_report_trap() {
+    let (mut gdb, rp2040) = server_with_rp();
+    for offset in (0..32).step_by(2) {
+        rp2040.write_u16(0x2000_0000 + offset, 0xbf00); // NOP x16
+    }
+    rp2040.core.set_pc(0x2000_0000);
+    let reply = gdb.process_message("c");
+    assert!(reply.as_deref() != Some("S05"), "false SIGTRAP: {reply:?}");
+}
+
+#[test]
+fn stepping_onto_bkpt_rewinds_pc_and_reports_trap() {
+    let (mut gdb, rp2040) = server_with_rp();
+    rp2040.write_u16(0x2000_0000, 0xbe00); // BKPT
+    rp2040.core.set_pc(0x2000_0000);
+    let reply = gdb.process_message("s").unwrap();
+    assert!(reply.starts_with("S05"), "reply was {reply}");
+    assert_eq!(rp2040.core.pc(), 0x2000_0000);
+}
+
+#[test]
+fn target_xml_register_sizes_match_g_packet() {
+    let mut gdb = server();
+    let xml = gdb
+        .process_message("qXfer:features:read:target.xml:0,ffff")
+        .unwrap();
+    assert!(xml.contains("name=\"control\" bitsize=\"2\""));
+    assert!(xml.contains("name=\"primask\" bitsize=\"1\""));
+    assert_eq!(gdb.process_message("g").unwrap().len(), 160);
+}
+
+#[test]
 fn simulator_batches_can_continue_again() {
     let mut simulator = Simulator::new();
     simulator.execute_steps(8);

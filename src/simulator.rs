@@ -75,6 +75,11 @@ impl GdbTarget for Simulator {
         self.execute_once();
     }
 
+    fn step(&mut self) {
+        self.break_flag.set(false);
+        self.rp2040.step();
+    }
+
     fn stop(&mut self) {
         self.stopped = true;
     }

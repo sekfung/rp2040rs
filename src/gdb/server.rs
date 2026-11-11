@@ -31,7 +31,38 @@ const REGISTER_INFO: [&str; 23] = [
     "name:control;bitsize:2;offset:79;encoding:int;format:hex;set:System Registers;",
 ];
 
-const TARGET_XML: &str = "<?xml version=\"1.0\"?><!DOCTYPE target SYSTEM \"gdb-target.dtd\"><target version=\"1.0\"><architecture>arm</architecture><feature name=\"org.gnu.gdb.arm.m-profile\"><reg name=\"r0\" bitsize=\"32\" regnum=\"0\"/><reg name=\"r1\" bitsize=\"32\" regnum=\"1\"/><reg name=\"r2\" bitsize=\"32\" regnum=\"2\"/><reg name=\"r3\" bitsize=\"32\" regnum=\"3\"/><reg name=\"r4\" bitsize=\"32\" regnum=\"4\"/><reg name=\"r5\" bitsize=\"32\" regnum=\"5\"/><reg name=\"r6\" bitsize=\"32\" regnum=\"6\"/><reg name=\"r7\" bitsize=\"32\" regnum=\"7\"/><reg name=\"r8\" bitsize=\"32\" regnum=\"8\"/><reg name=\"r9\" bitsize=\"32\" regnum=\"9\"/><reg name=\"r10\" bitsize=\"32\" regnum=\"10\"/><reg name=\"r11\" bitsize=\"32\" regnum=\"11\"/><reg name=\"r12\" bitsize=\"32\" regnum=\"12\"/><reg name=\"sp\" bitsize=\"32\" regnum=\"13\"/><reg name=\"lr\" bitsize=\"32\" regnum=\"14\"/><reg name=\"pc\" bitsize=\"32\" regnum=\"15\"/><reg name=\"xPSR\" bitsize=\"32\" regnum=\"16\"/></feature><feature name=\"org.gnu.gdb.arm.m-system\"><reg name=\"msp\" bitsize=\"32\" regnum=\"17\"/><reg name=\"psp\" bitsize=\"32\" regnum=\"18\"/><reg name=\"primask\" bitsize=\"8\" regnum=\"19\"/><reg name=\"basepri\" bitsize=\"8\" regnum=\"20\"/><reg name=\"faultmask\" bitsize=\"8\" regnum=\"21\"/><reg name=\"control\" bitsize=\"8\" regnum=\"22\"/></feature></target>";
+const TARGET_XML: &str = r#"<?xml version="1.0"?>
+<!DOCTYPE target SYSTEM "gdb-target.dtd">
+<target version="1.0">
+<architecture>arm</architecture>
+<feature name="org.gnu.gdb.arm.m-profile">
+<reg name="r0" bitsize="32" regnum="0" save-restore="yes" type="int" group="general"/>
+<reg name="r1" bitsize="32" regnum="1" save-restore="yes" type="int" group="general"/>
+<reg name="r2" bitsize="32" regnum="2" save-restore="yes" type="int" group="general"/>
+<reg name="r3" bitsize="32" regnum="3" save-restore="yes" type="int" group="general"/>
+<reg name="r4" bitsize="32" regnum="4" save-restore="yes" type="int" group="general"/>
+<reg name="r5" bitsize="32" regnum="5" save-restore="yes" type="int" group="general"/>
+<reg name="r6" bitsize="32" regnum="6" save-restore="yes" type="int" group="general"/>
+<reg name="r7" bitsize="32" regnum="7" save-restore="yes" type="int" group="general"/>
+<reg name="r8" bitsize="32" regnum="8" save-restore="yes" type="int" group="general"/>
+<reg name="r9" bitsize="32" regnum="9" save-restore="yes" type="int" group="general"/>
+<reg name="r10" bitsize="32" regnum="10" save-restore="yes" type="int" group="general"/>
+<reg name="r11" bitsize="32" regnum="11" save-restore="yes" type="int" group="general"/>
+<reg name="r12" bitsize="32" regnum="12" save-restore="yes" type="int" group="general"/>
+<reg name="sp" bitsize="32" regnum="13" save-restore="yes" type="data_ptr" group="general"/>
+<reg name="lr" bitsize="32" regnum="14" save-restore="yes" type="int" group="general"/>
+<reg name="pc" bitsize="32" regnum="15" save-restore="yes" type="code_ptr" group="general"/>
+<reg name="xPSR" bitsize="32" regnum="16" save-restore="yes" type="int" group="general"/>
+</feature>
+<feature name="org.gnu.gdb.arm.m-system">
+<reg name="msp" bitsize="32" regnum="17" save-restore="yes" type="data_ptr" group="system"/>
+<reg name="psp" bitsize="32" regnum="18" save-restore="yes" type="data_ptr" group="system"/>
+<reg name="primask" bitsize="1" regnum="19" save-restore="yes" type="int8" group="system"/>
+<reg name="basepri" bitsize="8" regnum="20" save-restore="yes" type="int8" group="system"/>
+<reg name="faultmask" bitsize="1" regnum="21" save-restore="yes" type="int8" group="system"/>
+<reg name="control" bitsize="2" regnum="22" save-restore="yes" type="int8" group="system"/>
+</feature>
+</target>"#;
 
 pub struct GdbServer {
     pub target: Box<dyn GdbTarget>,
@@ -86,21 +117,17 @@ impl GdbServer {
                     return Some("vCont;c;C;s;S".into());
                 }
                 if cmd.starts_with("vCont;c") || cmd.starts_with("vCont;C") {
-                    self.continue_target();
-                    return Some(STOP_REPLY_TRAP.into());
+                    return self.continue_target().then(|| STOP_REPLY_TRAP.to_string());
                 }
                 if cmd.starts_with("vCont;s") || cmd.starts_with("vCont;S") {
-                    rp2040.step();
+                    self.target.step();
                     return Some(self.step_reply());
                 }
                 Some(String::new())
             }
-            'c' => {
-                self.continue_target();
-                Some(STOP_REPLY_TRAP.into())
-            }
+            'c' => self.continue_target().then(|| STOP_REPLY_TRAP.to_string()),
             's' => {
-                rp2040.step();
+                self.target.step();
                 Some(self.step_reply())
             }
             'g' => {
@@ -188,20 +215,29 @@ impl GdbServer {
     }
 
     fn continue_target(&mut self) -> bool {
-        if !self.target.executing() {
+        // A synchronous GDB target runs in bounded batches. Keep executing
+        // until an actual BKPT or an explicit stop; a batch boundary alone is
+        // not a stop event and must not be reported as SIGTRAP.
+        const MAX_BATCHES: usize = 4;
+        for _ in 0..MAX_BATCHES {
             self.target.execute();
+            if self.target.last_break() {
+                let rp = self.target.rp2040();
+                let pc = rp.core.pc().wrapping_sub(rp.core.break_rewind());
+                rp.core.set_pc(pc);
+                return true;
+            }
         }
-        let broke = self.target.last_break();
-        if !self.target.executing() && broke {
-            let rp = self.target.rp2040();
-            let pc = rp.core.pc().wrapping_sub(rp.core.break_rewind());
-            rp.core.set_pc(pc);
-        }
-        broke
+        false
     }
 
     fn step_reply(&self) -> String {
         let rp = self.target.rp2040();
+        if self.target.last_break() {
+            let pc = rp.core.pc().wrapping_sub(rp.core.break_rewind());
+            rp.core.set_pc(pc);
+            return STOP_REPLY_TRAP.into();
+        }
         let mut status = String::from("T05");
         for i in 0..16 {
             status.push_str(&format!("{:02x}:{};", i, encode_hex_u32_le(rp.core.reg(i))));
