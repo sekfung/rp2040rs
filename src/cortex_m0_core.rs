@@ -741,7 +741,7 @@ impl Core {
             self.set_reg(rdn, result);
             self.set_nz(result);
             self.set_c(if shift != 0 {
-                input & (1u32.wrapping_shl(32 - shift)) != 0
+                input & 1u32.wrapping_shl(32u32.wrapping_sub(shift)) != 0
             } else {
                 self.c()
             });
