@@ -6,6 +6,7 @@ pub mod ppb;
 pub mod pwm;
 pub mod timer;
 pub mod uart;
+pub mod usb;
 pub mod xosc;
 
 pub use clocks::Clocks;

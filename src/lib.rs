@@ -9,6 +9,7 @@ pub mod irq;
 pub mod peripherals;
 pub mod rp2040;
 pub mod sio;
+pub mod usb;
 pub mod utils;
 
 #[cfg(test)]

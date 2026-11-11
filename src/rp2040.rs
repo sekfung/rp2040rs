@@ -12,6 +12,7 @@ use crate::peripherals::ppb::Ppb;
 use crate::peripherals::pwm::Pwm;
 use crate::peripherals::timer::Timer;
 use crate::peripherals::uart::Uart;
+use crate::peripherals::usb::UsbController;
 use crate::peripherals::xosc::Xosc;
 use crate::peripherals::{BasePeripheral, Peripheral};
 use crate::sio::Sio;
@@ -137,6 +138,7 @@ pub struct BoardShared {
     pub uart: [Option<Uart>; 2],
     pub sio: Option<Sio>,
     pub dma: Option<Dma>,
+    pub usb_ctrl: Option<UsbController>,
     pub gpio: [GpioPin; 30],
     pub qspi: [GpioPin; 6],
 }
@@ -160,6 +162,7 @@ pub struct Rp2040 {
     pub uart: [Uart; 2],
     pub sio: Sio,
     pub dma: Dma,
+    pub usb_ctrl: UsbController,
     pub gpio: [GpioPin; 30],
     pub qspi: [GpioPin; 6],
 }
@@ -206,6 +209,7 @@ impl Rp2040 {
                 uart: [None, None],
                 sio: None,
                 dma: None,
+                usb_ctrl: None,
                 gpio: gpio.clone(),
                 qspi: qspi.clone(),
             })
@@ -225,6 +229,7 @@ impl Rp2040 {
         ];
         let sio = Sio::new(core.clone(), weak.clone());
         let dma = Dma::new(weak.clone());
+        let usb_ctrl = UsbController::new("USB", weak.clone());
         {
             let mut board = shared.borrow_mut();
             board.ppb = Some(ppb.clone());
@@ -237,6 +242,7 @@ impl Rp2040 {
             board.uart = [Some(uart[0].clone()), Some(uart[1].clone())];
             board.sio = Some(sio.clone());
             board.dma = Some(dma.clone());
+            board.usb_ctrl = Some(usb_ctrl.clone());
         }
         let rp2040 = Self {
             shared: shared.clone(),
@@ -256,6 +262,7 @@ impl Rp2040 {
             uart,
             sio,
             dma,
+            usb_ctrl,
             gpio,
             qspi,
         };
@@ -309,13 +316,14 @@ impl Rp2040 {
     }
 
     fn register_real_peripherals(&self) {
-        let entries: [(u32, Rc<dyn Peripheral>); 6] = [
+        let entries: [(u32, Rc<dyn Peripheral>); 7] = [
             (0x40008, Rc::new(self.clocks.clone())),
             (0x40024, Rc::new(self.xosc.clone())),
             (0x40028, Rc::new(self.pll_sys.clone())),
             (0x4002c, Rc::new(self.pll_usb.clone())),
             (0x40050, Rc::new(self.pwm.clone())),
             (0x40054, Rc::new(self.timer.clone())),
+            (0x50110, Rc::new(self.usb_ctrl.clone())),
         ];
         for (key, peripheral) in entries {
             self.set_peripheral(key, peripheral);
@@ -681,9 +689,13 @@ impl Bus {
         } else if address >= DPRAM_START_ADDRESS
             && address.wrapping_add(3) < DPRAM_START_ADDRESS + board.usb_dpram.len() as u32
         {
-            board
-                .usb_dpram
-                .write_u32((address - DPRAM_START_ADDRESS) as usize, value);
+            let offset = address - DPRAM_START_ADDRESS;
+            board.usb_dpram.write_u32(offset as usize, value);
+            let usb = board.usb_ctrl.clone();
+            drop(board);
+            if let Some(usb) = usb {
+                usb.dpram_updated(offset, value);
+            }
         } else if (SIO_START_ADDRESS..SIO_START_ADDRESS + 0x1000_0000).contains(&address) {
             let sio = board.sio.clone();
             drop(board);
