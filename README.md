@@ -6,8 +6,18 @@ Raspberry Pi Pico emulator.
 Upstream pin: 1.4.1, commit
 `8693315df527adce8bf2bc315aeb4a1ca61c02a3`.
 
-This repository is being built in four green stages. The current stage is the
-foundation: utilities, clock, and opcode encoders.
+## Build and test
+
+```bash
+cargo test --lib
+cargo test
+cargo clippy --all-targets -- -D warnings
+cargo build --release
+```
+
+The foundation stage ports the upstream FIFO, time, Cortex-M0+ opcode, and PIO
+opcode tests: 91 unit tests. See `docs/parity.md` for the mapping to the
+upstream `vitest` suite and the remaining stages.
 
 ## License
 
