@@ -199,15 +199,14 @@ impl Dma {
     pub fn set_dreq(&self, channel: DreqChannel) {
         let mut state = self.state.borrow_mut();
         let index = channel as usize;
+        let treq = channel as u32;
         if !state.dreq[index] {
             state.dreq[index] = true;
             let active = state
                 .channels
                 .iter()
                 .enumerate()
-                .filter(|(channel_index, channel)| {
-                    channel.treq_value == *channel_index as u32 && channel.ctrl & BUSY != 0
-                })
+                .filter(|(_, channel)| channel.treq_value == treq && channel.ctrl & BUSY != 0)
                 .map(|(index, _)| index as u32)
                 .collect::<Vec<_>>();
             drop(state);
@@ -423,7 +422,10 @@ impl Dma {
             offset,
             CH_AL3_READ_ADDR_TRIG | CH_AL2_WRITE_ADDR_TRIG | CH_AL1_TRANS_COUNT_TRIG | CH_CTRL_TRIG
         );
-        let mut irq_quiet = false;
+        let ctrl_write = matches!(
+            offset,
+            CH_CTRL_TRIG | CH_AL1_CTRL | CH_AL2_CTRL | CH_AL3_CTRL
+        );
         {
             let mut state = self.state.borrow_mut();
             let Some(channel) = state.channels.get_mut(index as usize) else {
@@ -458,7 +460,6 @@ impl Dma {
                         2 => 4,
                         _ => 1,
                     };
-                    irq_quiet = channel.ctrl & IRQ_QUIET != 0;
                 }
                 CH_DBG_CTDREQ => channel.dreq_counter = 0,
                 _ => {}
@@ -467,20 +468,31 @@ impl Dma {
         if trigger {
             if value != 0 {
                 self.start(index);
-            } else if irq_quiet {
-                self.state.borrow_mut().int_raw |= 1 << index;
-                self.check_interrupts();
+            } else {
+                let irq_quiet = self
+                    .state
+                    .borrow()
+                    .channels
+                    .get(index as usize)
+                    .map(|channel| channel.ctrl & IRQ_QUIET != 0)
+                    .unwrap_or(false);
+                if irq_quiet {
+                    self.state.borrow_mut().int_raw |= 1 << index;
+                    self.check_interrupts();
+                }
             }
         }
-        let (enabled, busy) = {
-            let state = self.state.borrow();
-            let channel = &state.channels[index as usize];
-            (channel.ctrl & EN != 0, channel.ctrl & BUSY != 0)
-        };
-        if enabled && busy {
-            self.schedule(index);
-        } else if !enabled {
-            self.abort(index);
+        if ctrl_write {
+            let (enabled, busy) = {
+                let state = self.state.borrow();
+                let channel = &state.channels[index as usize];
+                (channel.ctrl & EN != 0, channel.ctrl & BUSY != 0)
+            };
+            if enabled && busy {
+                self.schedule(index);
+            } else if !enabled {
+                self.abort(index);
+            }
         }
     }
 }
@@ -531,28 +543,34 @@ impl Peripheral for Dma {
             self.channel_write(index, offset & CHANNEL_REGISTERS_MASK, value);
             return;
         }
+        let old = self.read_u32(offset);
+        let atomic_value = if atomic_type == 0 {
+            value
+        } else {
+            atomic_update(old, atomic_type, value)
+        };
         match offset {
             TIMER0 | TIMER1 | TIMER2 | TIMER3 => {
-                self.state.borrow_mut().timers[(offset - TIMER0) as usize] = value;
+                self.state.borrow_mut().timers[(offset - TIMER0) as usize] = atomic_value;
             }
             INTR | INTS0 | INTS1 => {
                 self.state.borrow_mut().int_raw &= !value;
                 self.check_interrupts();
             }
             INTE0 => {
-                self.state.borrow_mut().int_enable0 = value & 0xffff;
+                self.state.borrow_mut().int_enable0 = atomic_value & 0xffff;
                 self.check_interrupts();
             }
             INTF0 => {
-                self.state.borrow_mut().int_force0 = value & 0xffff;
+                self.state.borrow_mut().int_force0 = atomic_value & 0xffff;
                 self.check_interrupts();
             }
             INTE1 => {
-                self.state.borrow_mut().int_enable1 = value & 0xffff;
+                self.state.borrow_mut().int_enable1 = atomic_value & 0xffff;
                 self.check_interrupts();
             }
             INTF1 => {
-                self.state.borrow_mut().int_force1 = value & 0xffff;
+                self.state.borrow_mut().int_force1 = atomic_value & 0xffff;
                 self.check_interrupts();
             }
             MULTI_CHAN_TRIGGER => {
