@@ -42,10 +42,11 @@ impl SimulationClock {
                     .alarms
                     .iter()
                     .filter(|(_, entry)| entry.scheduled && entry.due <= target)
-                    .min_by(|(_, a), (_, b)| {
+                    .min_by(|(id_a, a), (id_b, b)| {
                         a.due
                             .partial_cmp(&b.due)
                             .unwrap_or(std::cmp::Ordering::Equal)
+                            .then_with(|| id_b.cmp(id_a))
                     })
                     .map(|(id, _)| *id)
             };
