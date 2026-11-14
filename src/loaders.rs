@@ -47,6 +47,7 @@ fn write_flash(flash: &Memory, address: u32, data: &[u8]) -> Result<usize, LoadE
 pub fn load_hex(source: &str, flash: &Memory) -> Result<usize, LoadError> {
     let mut upper = 0u32;
     let mut written = 0usize;
+    let mut bytes = Vec::new();
     for (line_no, raw) in source.lines().enumerate() {
         let line = raw.trim();
         if line.is_empty() {
@@ -65,7 +66,8 @@ pub fn load_hex(source: &str, flash: &Memory) -> Result<usize, LoadError> {
                 line_no + 1
             )));
         }
-        let mut bytes = Vec::with_capacity(digits.len() / 2);
+        bytes.clear();
+        bytes.reserve(digits.len() / 2);
         for pair in digits.as_bytes().chunks(2) {
             bytes.push(hex_u8(pair)?);
         }

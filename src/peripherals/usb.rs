@@ -734,10 +734,8 @@ impl Peripheral for UsbController {
             EP_STALL_ARM => self.state.borrow_mut().ep_stall_arm = atomic_value,
             NAK_POLL => self.state.borrow_mut().nak_poll = atomic_value,
             EP_STATUS_STALL_NAK => self.state.borrow_mut().ep_status_stall_nak &= !value,
-            USB_MUXING => {
-                if value & 0x4 != 0 && value & 0x1 == 0 {
-                    self.state.borrow_mut().sie_status |= SIE_CONNECTED;
-                }
+            USB_MUXING if value & 0x4 != 0 && value & 0x1 == 0 => {
+                self.state.borrow_mut().sie_status |= SIE_CONNECTED;
             }
             USB_PWR => {
                 self.state.borrow_mut().usb_pwr = atomic_value;

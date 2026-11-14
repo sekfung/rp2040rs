@@ -2,7 +2,7 @@ use std::cell::RefCell;
 use std::rc::{Rc, Weak};
 
 use crate::clock::Alarm;
-use crate::gpio_pin::{SOURCE_PIO0, SOURCE_PIO1};
+use crate::gpio_pin::{GpioPin, SOURCE_PIO0, SOURCE_PIO1};
 use crate::peripherals::dma::DreqChannel;
 use crate::peripherals::{atomic_update, Peripheral};
 use crate::rp2040::BoardShared;
@@ -259,14 +259,23 @@ impl Pio {
         let board = board.borrow();
         let mut value = 0;
         for (index, pin) in board.gpio.iter().enumerate() {
-            let pin_value = if pin.raw_output_enable() {
-                pin.raw_output_value()
-            } else {
-                pin.input_value()
-            };
-            if pin_value {
+            if pin.pio_input_value() {
                 value |= 1 << index;
             }
+        }
+        value
+    }
+
+    fn masked_gpio_values(&self, mut mask: u32) -> u32 {
+        let Some(board) = self.board() else {
+            return 0;
+        };
+        let board = board.borrow();
+        let mut value = 0;
+        while mask != 0 {
+            let index = mask.trailing_zeros();
+            mask &= mask - 1;
+            value |= u32::from(board.gpio[index as usize].pio_input_value()) << index;
         }
         value
     }
@@ -276,13 +285,10 @@ impl Pio {
             return false;
         };
         let borrowed = board.borrow();
-        borrowed.gpio.get(pin as usize).is_some_and(|pin| {
-            if pin.raw_output_enable() {
-                pin.raw_output_value()
-            } else {
-                pin.input_value()
-            }
-        })
+        borrowed
+            .gpio
+            .get(pin as usize)
+            .is_some_and(GpioPin::pio_input_value)
     }
 
     fn update_interrupts(&self, state: &PioState) {
@@ -340,7 +346,7 @@ impl Pio {
     }
 
     fn check_changed_pins(&self) {
-        let (changed, values, directions) = {
+        let (mut changed, values, directions) = {
             let mut state = self.state.borrow_mut();
             let changed = (state.old_pin_directions ^ state.pin_directions)
                 | (state.old_pin_values ^ state.pin_values);
@@ -355,24 +361,19 @@ impl Pio {
         }
         if let Some(board) = self.board() {
             let board = board.borrow();
-            for index in 0..30 {
+            let source = if self.index == 0 {
+                SOURCE_PIO0
+            } else {
+                SOURCE_PIO1
+            };
+            while changed != 0 {
+                let index = changed.trailing_zeros() as usize;
                 let bit = 1u32 << index;
-                if changed & bit != 0 && directions & bit != 0 {
-                    board.gpio[index].set_source_output(
-                        if self.index == 0 {
-                            SOURCE_PIO0
-                        } else {
-                            SOURCE_PIO1
-                        },
-                        values & bit != 0,
-                        true,
-                    );
-                } else if changed & bit != 0 {
-                    board.gpio[index].clear_source_output(if self.index == 0 {
-                        SOURCE_PIO0
-                    } else {
-                        SOURCE_PIO1
-                    });
+                changed &= changed - 1;
+                if directions & bit != 0 {
+                    board.gpio[index].set_source_output(source, values & bit != 0, true);
+                } else {
+                    board.gpio[index].clear_source_output(source);
                 }
             }
         }
@@ -426,20 +427,10 @@ impl Pio {
         }
     }
 
-    fn in_pins(&self, machine: &StateMachine) -> u32 {
-        let values = self.gpio_values();
-        let base = (machine.pin_ctrl >> 15) & 0x1f;
-        if base != 0 {
-            values.rotate_right(base)
-        } else {
-            values
-        }
-    }
-
     fn in_source(&self, state: &PioState, index: usize, source: u32) -> u32 {
         let machine = &state.machines[index];
         match source {
-            0 => self.in_pins(machine),
+            0 => self.gpio_values().rotate_right(machine.in_base()),
             1 => machine.x,
             2 => machine.y,
             3 | 4 => 0,
@@ -641,11 +632,9 @@ impl Pio {
         let opcode = opcode as u32;
         let arg = opcode & 0xff;
         match opcode >> 13 {
-            0b000 => {
-                if self.jmp_condition(state, index, arg >> 5) {
-                    state.machines[index].pc = arg & 0x1f;
-                    state.machines[index].update_pc = false;
-                }
+            0b000 if self.jmp_condition(state, index, arg >> 5) => {
+                state.machines[index].pc = arg & 0x1f;
+                state.machines[index].update_pc = false;
             }
             0b001 => {
                 let polarity = arg & 0x80 != 0;
@@ -672,12 +661,19 @@ impl Pio {
             }
             0b010 => {
                 let bit_count = arg & 0x1f;
-                let source_value = self.in_source(state, index, arg >> 5);
+                let source = arg >> 5;
                 if bit_count == 0 {
-                    state.machines[index].input_shift_reg = source_value;
+                    state.machines[index].input_shift_reg = self.in_source(state, index, source);
                     state.machines[index].input_shift_count = 32;
                 } else {
-                    let value = source_value & Self::mask_for(bit_count);
+                    let mask = Self::mask_for(bit_count);
+                    let value = if source == 0 {
+                        let base = state.machines[index].in_base();
+                        self.masked_gpio_values(mask.rotate_left(base) & VALID_PINS_MASK)
+                            .rotate_right(base)
+                    } else {
+                        self.in_source(state, index, source) & mask
+                    };
                     let shift_in = state.machines[index].shift_ctrl & SHIFTCTRL_IN_SHIFTDIR != 0;
                     if shift_in {
                         state.machines[index].input_shift_reg >>= bit_count;

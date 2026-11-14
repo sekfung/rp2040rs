@@ -25,7 +25,9 @@ impl Fifo {
     pub fn push(&mut self, value: u32) {
         let length = self.buffer.len();
         if self.used < length {
-            self.buffer[(self.start + self.used) % length] = value;
+            let end = self.start + self.used;
+            let index = if end >= length { end - length } else { end };
+            self.buffer[index] = value;
             self.used += 1;
         }
     }
@@ -35,7 +37,10 @@ impl Fifo {
             return 0;
         }
         let value = self.buffer[self.start];
-        self.start = (self.start + 1) % self.buffer.len();
+        self.start += 1;
+        if self.start == self.buffer.len() {
+            self.start = 0;
+        }
         self.used -= 1;
         value
     }

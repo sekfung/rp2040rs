@@ -15,6 +15,53 @@ fn cdc_constructs_and_queues_serial_bytes() {
 }
 
 #[test]
+fn cdc_enumerates_split_descriptors_and_delivers_serial_packets() {
+    let clock = Rc::new(MockClock::new());
+    let rp = Rp2040::with_clock(clock.clone());
+    let cdc = UsbCdc::new(rp.usb_ctrl.clone());
+    let connected = Rc::new(Cell::new(0));
+    let flag = connected.clone();
+    cdc.set_on_device_connected(Box::new(move || flag.set(flag.get() + 1)));
+    let received = Rc::new(RefCell::new(Vec::new()));
+    let sink = received.clone();
+    let mut callback_cdc = Some(cdc.clone());
+    cdc.set_on_serial_data(Box::new(move |bytes| {
+        sink.borrow_mut().extend_from_slice(bytes);
+        let cdc = callback_cdc.take().unwrap();
+        cdc.send_serial_byte(b'x');
+        let next_sink = sink.clone();
+        cdc.set_on_serial_data(Box::new(move |bytes| {
+            next_sink.borrow_mut().extend_from_slice(bytes);
+        }));
+    }));
+
+    let send_ep0 = |data: &[u8]| {
+        rp.usb_dpram.copy_from_slice(0x100, data);
+        rp.write_u32(0x5010_0080, (1 << 10) | (1 << 15) | data.len() as u32);
+        clock.advance(10);
+    };
+    let header = [9, 2, 32, 0, 1, 1, 0, 0x80, 50];
+    send_ep0(&header);
+    send_ep0(&header);
+    send_ep0(&[9, 4, 0, 0, 2, 10, 0, 0, 0]);
+    send_ep0(&[7, 5, 0x82, 2, 64, 0, 0, 7, 5, 3, 2, 64, 0]);
+    send_ep0(&[0]);
+    assert_eq!(rp.usb_dpram.byte(1), 9); // SET_CONFIGURATION
+    send_ep0(&[]);
+    assert_eq!(connected.get(), 1);
+    assert_eq!(rp.usb_dpram.byte(1), 0x22); // SET_CONTROL_LINE_STATE
+
+    rp.write_u32(0x5010_0010, 0x200);
+    for packet in [b"abc", b"def"] {
+        rp.usb_dpram.copy_from_slice(0x200, packet);
+        rp.write_u32(0x5010_0090, (1 << 10) | (1 << 15) | 3);
+        clock.advance(10);
+    }
+    assert_eq!(&*received.borrow(), b"abcdef");
+    assert_eq!(cdc.tx_fifo_item_count(), 1);
+}
+
+#[test]
 fn host_mode_connect_sets_full_speed_and_conn_dis() {
     let rp = Rp2040::new();
     rp.write_u32(0x5011_0040, 3); // CONTROLLER_EN | HOST_NDEVICE

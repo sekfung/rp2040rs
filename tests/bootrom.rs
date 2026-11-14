@@ -24,3 +24,12 @@ fn loading_bootrom_copies_every_word_into_16_kib_memory() {
     let last_offset = (BOOTROM_B1.len() * 4 - 4) as u32;
     assert_eq!(rp.read_u32(last_offset), *BOOTROM_B1.last().unwrap());
 }
+
+#[test]
+fn bootrom_subword_reads_keep_halfword_alignment_at_the_end() {
+    let rp = Rp2040::new();
+    rp.write_u32(0x3ffc, 0x4433_2211);
+    assert_eq!(rp.read_u16(0x3ffd), 0x2211);
+    assert_eq!(rp.read_u16(0x3fff), 0x4433);
+    assert_eq!(rp.read_u8(0x3fff), 0x44);
+}

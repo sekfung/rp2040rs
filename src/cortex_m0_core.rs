@@ -457,12 +457,63 @@ impl Core {
         self.set_pc(self.pc().wrapping_add(2));
         let mut delta_cycles = 1u32;
 
-        if opcode >> 6 == 0b0100000101 {
+        if opcode >> 11 == 0b11100 {
+            // B (unconditional)
+            let mut imm11 = ((opcode & 0x7ff) << 1) as i32;
+            if imm11 & (1 << 11) != 0 {
+                imm11 = (imm11 & 0x7ff) - 0x800;
+            }
+            self.set_pc(self.pc().wrapping_add(imm11 as u32).wrapping_add(2));
+            delta_cycles += 1;
+        } else if opcode >> 11 == 0b00100 {
+            // MOVS Rd, #imm8
+            let value = u32::from(opcode & 0xff);
+            let rd = ((opcode >> 8) & 0x7) as usize;
+            let mut state = self.state.borrow_mut();
+            state.registers[rd] = value;
+            state.n = false;
+            state.z = value == 0;
+        } else if opcode >> 12 == 0b1101 && ((opcode >> 9) & 0x7) != 0b111 {
+            // B (conditional)
+            let mut imm8 = ((opcode & 0xff) << 1) as i32;
+            if imm8 & (1 << 8) != 0 {
+                imm8 = (imm8 & 0x1ff) - 0x200;
+            }
+            let cond = ((opcode >> 8) & 0xf) as u32;
+            if self.check_condition(cond) {
+                self.set_pc(self.pc().wrapping_add(imm8 as u32).wrapping_add(2));
+                delta_cycles += 1;
+            }
+        } else if opcode >> 11 == 0b00111 {
+            // SUBS Rdn, #imm8
+            let imm8 = u32::from(opcode & 0xff);
+            let rdn = ((opcode >> 8) & 0x7) as usize;
+            let result = self.subtract_with_carry(self.reg(rdn), imm8, 1);
+            self.set_reg(rdn, result);
+        } else if opcode == 0b1011_1111_0000_0000 {
+            // NOP
+        } else if opcode >> 11 == 0b01101 {
+            // LDR (immediate)
+            let imm5 = u32::from((opcode >> 6) & 0x1f) << 2;
+            let rn = ((opcode >> 3) & 0x7) as usize;
+            let rt = (opcode & 0x7) as usize;
+            let addr = self.reg(rn).wrapping_add(imm5);
+            delta_cycles += self.cycles_io(addr, false);
+            self.set_reg(rt, bus.read_u32(addr));
+        } else if opcode >> 11 == 0b01100 {
+            // STR (immediate)
+            let imm5 = u32::from((opcode >> 6) & 0x1f) << 2;
+            let rn = ((opcode >> 3) & 0x7) as usize;
+            let rt = (opcode & 0x7) as usize;
+            let address = self.reg(rn).wrapping_add(imm5);
+            delta_cycles += self.cycles_io(address, true);
+            bus.write_u32(address, self.reg(rt));
+        } else if opcode >> 6 == 0b0100000101 {
             // ADCS Rdn, Rm
             let rdn = (opcode & 0x7) as usize;
             let rm = ((opcode >> 3) & 0x7) as usize;
             let carry = u32::from(self.c());
-            let result = self.add_with_carry(self.reg(rdn), self.reg(rm), carry, true);
+            let result = self.add_with_carry(self.reg(rdn), self.reg(rm), carry);
             self.set_reg(rdn, result);
         } else if opcode >> 11 == 0b10101 {
             // ADD Rd, SP, #imm8
@@ -479,20 +530,20 @@ impl Core {
             let rd = (opcode & 0x7) as usize;
             let rn = ((opcode >> 3) & 0x7) as usize;
             let imm = ((opcode >> 6) & 0x7) as u32;
-            let result = self.add_with_carry(self.reg(rn), imm, 0, true);
+            let result = self.add_with_carry(self.reg(rn), imm, 0);
             self.set_reg(rd, result);
         } else if opcode >> 11 == 0b00110 {
             // ADDS Rdn, #imm8
             let rdn = ((opcode >> 8) & 0x7) as usize;
             let imm = (opcode & 0xff) as u32;
-            let result = self.add_with_carry(self.reg(rdn), imm, 0, true);
+            let result = self.add_with_carry(self.reg(rdn), imm, 0);
             self.set_reg(rdn, result);
         } else if opcode >> 9 == 0b0001100 {
             // ADDS Rd, Rn, Rm
             let rd = (opcode & 0x7) as usize;
             let rn = ((opcode >> 3) & 0x7) as usize;
             let rm = ((opcode >> 6) & 0x7) as usize;
-            let result = self.add_with_carry(self.reg(rn), self.reg(rm), 0, true);
+            let result = self.add_with_carry(self.reg(rn), self.reg(rm), 0);
             self.set_reg(rd, result);
         } else if opcode >> 8 == 0b01000100 {
             // ADD (high registers), T2
@@ -549,25 +600,6 @@ impl Core {
             self.set_reg(rdn, result);
             self.set_nz(result);
             self.set_c(carry);
-        } else if opcode >> 12 == 0b1101 && ((opcode >> 9) & 0x7) != 0b111 {
-            // B (conditional)
-            let mut imm8 = ((opcode & 0xff) << 1) as i32;
-            if imm8 & (1 << 8) != 0 {
-                imm8 = (imm8 & 0x1ff) - 0x200;
-            }
-            let cond = ((opcode >> 8) & 0xf) as u32;
-            if self.check_condition(cond) {
-                self.set_pc(self.pc().wrapping_add(imm8 as u32).wrapping_add(2));
-                delta_cycles += 1;
-            }
-        } else if opcode >> 11 == 0b11100 {
-            // B (unconditional)
-            let mut imm11 = ((opcode & 0x7ff) << 1) as i32;
-            if imm11 & (1 << 11) != 0 {
-                imm11 = (imm11 & 0x7ff) - 0x800;
-            }
-            self.set_pc(self.pc().wrapping_add(imm11 as u32).wrapping_add(2));
-            delta_cycles += 1;
         } else if opcode >> 6 == 0b0100001110 {
             // BICS Rdn, Rm
             let rdn = (opcode & 0x7) as usize;
@@ -607,22 +639,22 @@ impl Core {
             // CMN (register)
             let rm = ((opcode >> 3) & 0x7) as usize;
             let rn = (opcode & 0x7) as usize;
-            self.add_with_carry(self.reg(rn), self.reg(rm), 0, true);
+            self.add_with_carry(self.reg(rn), self.reg(rm), 0);
         } else if opcode >> 11 == 0b00101 {
             // CMP immediate
             let rn = ((opcode >> 8) & 0x7) as usize;
             let imm8 = u32::from(opcode & 0xff);
-            self.subtract_with_carry(self.reg(rn), imm8, 1, true);
+            self.subtract_with_carry(self.reg(rn), imm8, 1);
         } else if opcode >> 6 == 0b0100001010 {
             // CMP (register)
             let rm = ((opcode >> 3) & 0x7) as usize;
             let rn = (opcode & 0x7) as usize;
-            self.subtract_with_carry(self.reg(rn), self.reg(rm), 1, true);
+            self.subtract_with_carry(self.reg(rn), self.reg(rm), 1);
         } else if opcode >> 8 == 0b01000101 {
             // CMP (register) T2
             let rm = ((opcode >> 3) & 0xf) as usize;
             let rn = (((opcode >> 4) & 0x8) | (opcode & 0x7)) as usize;
-            self.subtract_with_carry(self.reg(rn), self.reg(rm), 1, true);
+            self.subtract_with_carry(self.reg(rn), self.reg(rm), 1);
         } else if opcode == 0xb672 {
             // CPSID i
             self.state.borrow_mut().pm = true;
@@ -664,14 +696,6 @@ impl Core {
             if registers & (1 << rn) == 0 {
                 self.set_reg(rn, address);
             }
-        } else if opcode >> 11 == 0b01101 {
-            // LDR (immediate)
-            let imm5 = u32::from((opcode >> 6) & 0x1f) << 2;
-            let rn = ((opcode >> 3) & 0x7) as usize;
-            let rt = (opcode & 0x7) as usize;
-            let addr = self.reg(rn).wrapping_add(imm5);
-            delta_cycles += self.cycles_io(addr, false);
-            self.set_reg(rt, bus.read_u32(addr));
         } else if opcode >> 11 == 0b10011 {
             // LDR (sp + immediate)
             let rt = ((opcode >> 8) & 0x7) as usize;
@@ -821,13 +845,6 @@ impl Core {
             } else {
                 self.set_reg(rd, value);
             }
-        } else if opcode >> 11 == 0b00100 {
-            // MOVS Rd, #imm8
-            let value = u32::from(opcode & 0xff);
-            let rd = ((opcode >> 8) & 0x7) as usize;
-            self.state.borrow_mut().registers[rd] = value;
-            self.set_n(value & 0x8000_0000 != 0);
-            self.set_z(value == 0);
         } else if opcode == 0b1111001111101111 && opcode2 >> 12 == 0b1000 {
             // MRS
             let sysm = u32::from(opcode2 & 0xff);
@@ -865,12 +882,7 @@ impl Core {
             self.set_nz(result);
         } else if opcode >> 9 == 0x5a {
             // PUSH
-            let mut bit_count = 0u32;
-            for i in 0..=8 {
-                if opcode & (1 << i) != 0 {
-                    bit_count += 1;
-                }
-            }
+            let bit_count = (opcode & 0x1ff).count_ones();
             let mut address = self.sp().wrapping_sub(4 * bit_count);
             for i in 0..=7 {
                 if opcode & (1 << i) != 0 {
@@ -901,8 +913,6 @@ impl Core {
             } else {
                 self.set_sp(address);
             }
-        } else if opcode == 0b1011_1111_0000_0000 {
-            // NOP
         } else if opcode >> 6 == 0b1011101000 {
             // REV
             let rm = ((opcode >> 3) & 0x7) as usize;
@@ -948,14 +958,13 @@ impl Core {
             // RSBS
             let rn = ((opcode >> 3) & 0x7) as usize;
             let rd = (opcode & 0x7) as usize;
-            let result = self.subtract_with_carry(0, self.reg(rn), 1, true);
+            let result = self.subtract_with_carry(0, self.reg(rn), 1);
             self.set_reg(rd, result);
         } else if opcode >> 6 == 0b0100000110 {
             // SBCS
             let rm = ((opcode >> 3) & 0x7) as usize;
             let rdn = (opcode & 0x7) as usize;
-            let result =
-                self.subtract_with_carry(self.reg(rdn), self.reg(rm), u32::from(self.c()), true);
+            let result = self.subtract_with_carry(self.reg(rdn), self.reg(rm), u32::from(self.c()));
             self.set_reg(rdn, result);
         } else if opcode == 0b1011111101000000 {
             // SEV
@@ -974,14 +983,6 @@ impl Core {
             if registers & (1 << rn) == 0 {
                 self.set_reg(rn, address);
             }
-        } else if opcode >> 11 == 0b01100 {
-            // STR (immediate)
-            let imm5 = u32::from((opcode >> 6) & 0x1f) << 2;
-            let rn = ((opcode >> 3) & 0x7) as usize;
-            let rt = (opcode & 0x7) as usize;
-            let address = self.reg(rn).wrapping_add(imm5);
-            delta_cycles += self.cycles_io(address, true);
-            bus.write_u32(address, self.reg(rt));
         } else if opcode >> 11 == 0b10010 {
             // STR (sp + immediate)
             let rt = ((opcode >> 8) & 0x7) as usize;
@@ -1038,20 +1039,14 @@ impl Core {
             let imm3 = u32::from((opcode >> 6) & 0x7);
             let rn = ((opcode >> 3) & 0x7) as usize;
             let rd = (opcode & 0x7) as usize;
-            let result = self.subtract_with_carry(self.reg(rn), imm3, 1, true);
+            let result = self.subtract_with_carry(self.reg(rn), imm3, 1);
             self.set_reg(rd, result);
-        } else if opcode >> 11 == 0b00111 {
-            // SUBS Rdn, #imm8
-            let imm8 = u32::from(opcode & 0xff);
-            let rdn = ((opcode >> 8) & 0x7) as usize;
-            let result = self.subtract_with_carry(self.reg(rdn), imm8, 1, true);
-            self.set_reg(rdn, result);
         } else if opcode >> 9 == 0b0001101 {
             // SUBS Rd, Rn, Rm
             let rm = ((opcode >> 6) & 0x7) as usize;
             let rn = ((opcode >> 3) & 0x7) as usize;
             let rd = (opcode & 0x7) as usize;
-            let result = self.subtract_with_carry(self.reg(rn), self.reg(rm), 1, true);
+            let result = self.subtract_with_carry(self.reg(rn), self.reg(rm), 1);
             self.set_reg(rd, result);
         } else if opcode >> 8 == 0b11011111 {
             // SVC
@@ -1137,18 +1132,8 @@ impl Core {
         }
     }
 
-    fn subtract_with_carry(&self, a: u32, b: u32, carry: u32, set_flags: bool) -> u32 {
-        let borrow = 1u64 - u64::from(carry);
-        let subtrahend = u64::from(b) + borrow;
-        let result = (u64::from(a)).wrapping_sub(subtrahend) as u32;
-        if set_flags {
-            self.set_n(result & 0x8000_0000 != 0);
-            self.set_z(result == 0);
-            self.set_c(u64::from(a) >= subtrahend);
-            let overflow = ((a ^ b) & (a ^ result) & 0x8000_0000) != 0;
-            self.set_v(overflow);
-        }
-        result
+    fn subtract_with_carry(&self, a: u32, b: u32, carry: u32) -> u32 {
+        self.add_with_carry(a, !b, carry)
     }
 
     fn cycles_io(&self, address: u32, write: bool) -> u32 {
@@ -1183,20 +1168,19 @@ impl Core {
     }
 
     fn set_nz(&self, value: u32) {
-        self.set_n(value & 0x8000_0000 != 0);
-        self.set_z(value == 0);
+        let mut state = self.state.borrow_mut();
+        state.n = value & 0x8000_0000 != 0;
+        state.z = value == 0;
     }
 
-    fn add_with_carry(&self, a: u32, b: u32, carry: u32, set_flags: bool) -> u32 {
+    fn add_with_carry(&self, a: u32, b: u32, carry: u32) -> u32 {
         let sum = u64::from(a) + u64::from(b) + u64::from(carry);
         let result = sum as u32;
-        if set_flags {
-            self.set_n(result & 0x8000_0000 != 0);
-            self.set_z(result == 0);
-            self.set_c(sum > u64::from(u32::MAX));
-            let overflow = (!(a ^ b) & (a ^ result) & 0x8000_0000) != 0;
-            self.set_v(overflow);
-        }
+        let mut state = self.state.borrow_mut();
+        state.n = result & 0x8000_0000 != 0;
+        state.z = result == 0;
+        state.c = sum > u64::from(u32::MAX);
+        state.v = (!(a ^ b) & (a ^ result) & 0x8000_0000) != 0;
         result
     }
 

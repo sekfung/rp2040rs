@@ -1,21 +1,67 @@
 use std::cell::RefCell;
-use std::collections::BTreeMap;
+use std::cmp::Ordering;
 use std::rc::Rc;
 
 use super::{Alarm, AlarmCallback, Clock};
 
+type SharedCallback = Rc<RefCell<AlarmCallback>>;
+
 pub(crate) struct ClockState {
-    pub(crate) nanos: f64,
-    pub(crate) next_id: u64,
-    pub(crate) next_order: u64,
-    pub(crate) alarms: BTreeMap<u64, AlarmEntry>,
-    pub(crate) callbacks: BTreeMap<u64, Rc<RefCell<AlarmCallback>>>,
+    nanos: f64,
+    next_order: u64,
+    alarms: Vec<AlarmEntry>,
+    // The next alarm is last, so firing it is a pop that retains capacity.
+    scheduled: Vec<Deadline>,
 }
 
-pub(crate) struct AlarmEntry {
-    pub(crate) due: f64,
-    pub(crate) order: u64,
-    pub(crate) scheduled: bool,
+struct AlarmEntry {
+    deadline: Option<Deadline>,
+    callback: SharedCallback,
+}
+
+#[derive(Clone, Copy)]
+struct Deadline {
+    due: f64,
+    order: u64,
+    id: usize,
+}
+
+impl Deadline {
+    fn cmp(&self, other: &Self) -> Ordering {
+        // NaN deadlines never enter the queue. Equal deadlines fire newest first.
+        other
+            .due
+            .partial_cmp(&self.due)
+            .unwrap()
+            .then_with(|| self.order.cmp(&other.order))
+            .then_with(|| other.id.cmp(&self.id))
+    }
+}
+
+impl ClockState {
+    fn deadline_index(&self, deadline: &Deadline) -> Result<usize, usize> {
+        self.scheduled.binary_search_by(|entry| entry.cmp(deadline))
+    }
+
+    fn pop_due_alarm(&mut self, target: f64) -> Option<SharedCallback> {
+        let next = self.scheduled.last()?;
+        if next.due <= target {
+            let deadline = self.scheduled.pop().unwrap();
+            self.nanos = deadline.due;
+            let alarm = &mut self.alarms[deadline.id];
+            alarm.deadline = None;
+            Some(alarm.callback.clone())
+        } else {
+            None
+        }
+    }
+
+    fn cancel_alarm(&mut self, id: usize) {
+        if let Some(deadline) = self.alarms[id].deadline.take() {
+            let index = self.deadline_index(&deadline).unwrap();
+            self.scheduled.remove(index);
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -28,62 +74,28 @@ impl SimulationClock {
         Self {
             state: Rc::new(RefCell::new(ClockState {
                 nanos: 0.0,
-                next_id: 0,
                 next_order: 0,
-                alarms: BTreeMap::new(),
-                callbacks: BTreeMap::new(),
+                alarms: Vec::new(),
+                scheduled: Vec::new(),
             })),
         }
     }
 
     pub fn tick(&self, delta_nanos: f64) {
-        let target = self.state.borrow().nanos + delta_nanos;
-        loop {
-            let due_id = {
-                let state = self.state.borrow();
-                state
-                    .alarms
-                    .iter()
-                    .filter(|(_, entry)| entry.scheduled && entry.due <= target)
-                    .min_by(|(_, a), (_, b)| {
-                        a.due
-                            .partial_cmp(&b.due)
-                            .unwrap_or(std::cmp::Ordering::Equal)
-                            .then_with(|| b.order.cmp(&a.order))
-                    })
-                    .map(|(id, _)| *id)
-            };
-            let Some(id) = due_id else {
-                break;
-            };
-            let callback = {
-                let mut state = self.state.borrow_mut();
-                if let Some(entry) = state.alarms.get_mut(&id) {
-                    entry.scheduled = false;
-                    state.nanos = entry.due;
-                }
-                state.callbacks.get(&id).cloned()
-            };
-            if let Some(callback) = callback {
-                (callback.borrow_mut())();
-            }
+        let mut state = self.state.borrow_mut();
+        let target = state.nanos + delta_nanos;
+        while let Some(callback) = state.pop_due_alarm(target) {
+            drop(state);
+            (callback.borrow_mut())();
+            state = self.state.borrow_mut();
         }
-        self.state.borrow_mut().nanos = target;
+        state.nanos = target;
     }
 
     pub fn nanos_to_next_alarm(&self) -> Option<f64> {
         let state = self.state.borrow();
-        let next = state
-            .alarms
-            .values()
-            .filter(|entry| entry.scheduled)
-            .map(|entry| entry.due - state.nanos)
-            .fold(f64::INFINITY, f64::min);
-        if next.is_finite() {
-            Some(next)
-        } else {
-            None
-        }
+        let next = state.scheduled.last()?.due - state.nanos;
+        next.is_finite().then_some(next)
     }
 }
 
@@ -100,17 +112,11 @@ impl Clock for SimulationClock {
 
     fn create_alarm(&self, callback: AlarmCallback) -> Alarm {
         let mut state = self.state.borrow_mut();
-        let id = state.next_id;
-        state.next_id += 1;
-        state.alarms.insert(
-            id,
-            AlarmEntry {
-                due: 0.0,
-                order: 0,
-                scheduled: false,
-            },
-        );
-        state.callbacks.insert(id, Rc::new(RefCell::new(callback)));
+        let id = state.alarms.len();
+        state.alarms.push(AlarmEntry {
+            deadline: None,
+            callback: Rc::new(RefCell::new(callback)),
+        });
         Alarm {
             clock: Rc::downgrade(&self.state),
             id,
@@ -126,20 +132,23 @@ impl Clock for SimulationClock {
     }
 }
 
-pub(crate) fn schedule_alarm(clock: &Rc<RefCell<ClockState>>, id: u64, delta_nanos: f64) {
+pub(crate) fn schedule_alarm(clock: &Rc<RefCell<ClockState>>, id: usize, delta_nanos: f64) {
     let mut state = clock.borrow_mut();
-    let nanos = state.nanos;
-    let order = state.next_order;
-    state.next_order += 1;
-    if let Some(entry) = state.alarms.get_mut(&id) {
-        entry.due = nanos + delta_nanos;
-        entry.order = order;
-        entry.scheduled = true;
+    state.cancel_alarm(id);
+    let due = state.nanos + delta_nanos;
+    if !due.is_nan() {
+        let deadline = Deadline {
+            due,
+            order: state.next_order,
+            id,
+        };
+        state.next_order += 1;
+        let index = state.deadline_index(&deadline).unwrap_err();
+        state.scheduled.insert(index, deadline);
+        state.alarms[id].deadline = Some(deadline);
     }
 }
 
-pub(crate) fn cancel_alarm(clock: &Rc<RefCell<ClockState>>, id: u64) {
-    if let Some(entry) = clock.borrow_mut().alarms.get_mut(&id) {
-        entry.scheduled = false;
-    }
+pub(crate) fn cancel_alarm(clock: &Rc<RefCell<ClockState>>, id: usize) {
+    clock.borrow_mut().cancel_alarm(id);
 }

@@ -163,106 +163,86 @@ impl UsbCdc {
 }
 
 fn handle_endpoint_write(cdc: &Rc<RefCell<CdcState>>, endpoint: u32, buffer: &[u8]) {
-    let mut send_descriptor = false;
-    let mut send_config = false;
-    let mut control_line = false;
-    let mut notify_connected = false;
-    let serial;
-    let mut descriptors_size;
-    let mut descriptors;
-    let mut initialized;
-    let mut endpoints_update = None;
-    let usb;
-    {
-        let state = cdc.borrow();
-        usb = state.usb.clone();
-        descriptors_size = state.descriptors_size;
-        descriptors = state.descriptors.clone();
-        initialized = state.initialized;
-        if endpoint == ENDPOINT_ZERO && buffer.is_empty() {
-            if descriptors_size.is_none() {
-                send_descriptor = true;
-            } else if !initialized {
-                control_line = true;
-                notify_connected = true;
-                initialized = true;
+    let mut state = cdc.borrow_mut();
+    let serial = endpoint as i32 == state.in_endpoint;
+    if endpoint == ENDPOINT_ZERO {
+        let (descriptor_length, send_config, notify_connected) =
+            update_control_endpoint(&mut state, buffer);
+        if descriptor_length.is_some() || send_config || notify_connected {
+            let usb = state.usb.clone();
+            drop(state);
+            if let Some(length) = descriptor_length {
+                usb.send_setup_packet(&get_descriptor_packet(
+                    DescriptorType::Configuration,
+                    length,
+                    0,
+                ));
             }
-        }
-        if endpoint == ENDPOINT_ZERO && buffer.len() > 1 {
-            if buffer.len() == CONFIGURATION_DESCRIPTOR_SIZE
-                && buffer[1] == DescriptorType::Configuration as u8
-                && descriptors_size.is_none()
-            {
-                descriptors_size = Some(usize::from(buffer[2]) | (usize::from(buffer[3]) << 8));
-                send_descriptor = true;
-            } else if let Some(size) = descriptors_size {
-                if descriptors.len() < size {
-                    descriptors.extend_from_slice(buffer);
+            if send_config {
+                usb.send_setup_packet(&set_device_configuration_packet(1));
+            }
+            if notify_connected {
+                usb.send_setup_packet(&create_setup_packet(SetupPacketParams {
+                    data_direction: DataDirection::HostToDevice,
+                    setup_type: SetupType::Class,
+                    recipient: SetupRecipient::Device,
+                    b_request: CDC_REQUEST_SET_CONTROL_LINE_STATE,
+                    w_value: CDC_DTR | CDC_RTS,
+                    w_index: 0,
+                    w_length: 0,
+                }));
+                let callback = cdc.borrow_mut().on_device_connected.take();
+                if let Some(mut callback) = callback {
+                    callback();
+                    cdc.borrow_mut().on_device_connected.get_or_insert(callback);
                 }
             }
-            if let Some(size) = descriptors_size {
-                if descriptors.len() == size {
-                    let endpoints = extract_endpoint_numbers(&descriptors);
-                    send_config = true;
-                    endpoints_update = Some(endpoints);
-                }
-            }
-        }
-        serial = endpoint as i32 == state.in_endpoint;
-    }
-    if let Some(endpoints) = endpoints_update {
-        let mut state = cdc.borrow_mut();
-        state.in_endpoint = endpoints.in_endpoint;
-        state.out_endpoint = endpoints.out_endpoint;
-    }
-    if send_descriptor {
-        let length = descriptors_size.unwrap_or(CONFIGURATION_DESCRIPTOR_SIZE) as u16;
-        usb.send_setup_packet(&get_descriptor_packet(
-            DescriptorType::Configuration,
-            length,
-            0,
-        ));
-    }
-    if control_line {
-        usb.send_setup_packet(&create_setup_packet(SetupPacketParams {
-            data_direction: DataDirection::HostToDevice,
-            setup_type: SetupType::Class,
-            recipient: SetupRecipient::Device,
-            b_request: CDC_REQUEST_SET_CONTROL_LINE_STATE,
-            w_value: CDC_DTR | CDC_RTS,
-            w_index: 0,
-            w_length: 0,
-        }));
-    }
-    if send_config {
-        usb.send_setup_packet(&set_device_configuration_packet(1));
-    }
-    {
-        let mut state = cdc.borrow_mut();
-        state.initialized = initialized;
-        state.descriptors_size = descriptors_size;
-        state.descriptors = descriptors;
-    }
-    if notify_connected {
-        let callback = cdc.borrow_mut().on_device_connected.take();
-        if let Some(mut callback) = callback {
-            callback();
-            let mut state = cdc.borrow_mut();
-            if state.on_device_connected.is_none() {
-                state.on_device_connected = Some(callback);
-            }
+            state = cdc.borrow_mut();
         }
     }
     if serial {
-        let callback = cdc.borrow_mut().on_serial_data.take();
+        let callback = state.on_serial_data.take();
+        drop(state);
         if let Some(mut callback) = callback {
             callback(buffer);
-            let mut state = cdc.borrow_mut();
-            if state.on_serial_data.is_none() {
-                state.on_serial_data = Some(callback);
-            }
+            cdc.borrow_mut().on_serial_data.get_or_insert(callback);
         }
     }
+}
+
+// Returns the descriptor request length, whether to set the configuration, and whether to connect.
+fn update_control_endpoint(state: &mut CdcState, buffer: &[u8]) -> (Option<u16>, bool, bool) {
+    if buffer.is_empty() {
+        if state.descriptors_size.is_none() {
+            return (Some(CONFIGURATION_DESCRIPTOR_SIZE as u16), false, false);
+        }
+        return (
+            None,
+            false,
+            !std::mem::replace(&mut state.initialized, true),
+        );
+    }
+    let mut length = None;
+    if buffer.len() == CONFIGURATION_DESCRIPTOR_SIZE
+        && buffer[1] == DescriptorType::Configuration as u8
+        && state.descriptors_size.is_none()
+    {
+        let size = u16::from_le_bytes([buffer[2], buffer[3]]);
+        state.descriptors_size = Some(usize::from(size));
+        length = Some(size);
+    } else if state
+        .descriptors_size
+        .is_some_and(|size| state.descriptors.len() < size)
+    {
+        state.descriptors.extend_from_slice(buffer);
+    }
+    let send_config = state.descriptors_size == Some(state.descriptors.len());
+    if send_config {
+        let endpoints = extract_endpoint_numbers(&state.descriptors);
+        state.in_endpoint = endpoints.in_endpoint;
+        state.out_endpoint = endpoints.out_endpoint;
+    }
+    (length, send_config, false)
 }
 
 #[cfg(test)]

@@ -11,6 +11,7 @@ const PIO1: u32 = 0x5030_0000;
 const CTRL: u32 = PIO0;
 const SM0_EXECCTRL: u32 = PIO0 + 0x0cc;
 const SM0_SHIFTCTRL: u32 = PIO0 + 0x0d0;
+const SM0_INSTR: u32 = PIO0 + 0x0d8;
 const SM0_PINCTRL: u32 = PIO0 + 0x0dc;
 const INSTR_MEM0: u32 = PIO0 + 0x048;
 const INSTR_MEM1: u32 = PIO0 + 0x04c;
@@ -123,4 +124,25 @@ fn autopush_stall_does_not_reuse_stale_shift_data() {
     rp.pio[0].step();
 
     assert_eq!(rp.read_u32(RXF0), 0);
+}
+
+#[test]
+fn in_pins_wraps_past_gpio31_and_uses_the_selected_raw_output() {
+    use rp2040rs::gpio_pin::{FUNCTION_SIO, SOURCE_SIO};
+
+    let rp = Rp2040::new();
+    rp.gpio[29].set_pad_value(0x40);
+    rp.gpio[29].set_input_value(true);
+    rp.gpio[0].set_ctrl(FUNCTION_SIO | (2 << 16)); // INOVER forces input low.
+    rp.gpio[0].set_source_output(SOURCE_SIO, true, true);
+    rp.gpio[1].set_pad_value(0x40);
+    rp.gpio[1].set_input_value(true);
+
+    rp.write_u32(SM0_PINCTRL, 29 << 15);
+    rp.write_u32(SM0_SHIFTCTRL, SHIFTCTRL_AUTOPUSH | (4 << PUSH_THRESH_SHIFT));
+    rp.write_u16(SM0_INSTR, pio_in(PIO_SRC_PINS, 4, 0));
+    assert_eq!(rp.read_u32(RXF0), 0b1001);
+
+    rp.write_u16(SM0_INSTR, pio_in(PIO_SRC_PINS, 0, 0));
+    assert_eq!(rp.read_u32(RXF0), 0b11001);
 }

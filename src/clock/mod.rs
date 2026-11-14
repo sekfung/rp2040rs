@@ -19,7 +19,7 @@ pub trait Clock: 'static {
 #[derive(Clone)]
 pub struct Alarm {
     pub(crate) clock: Weak<RefCell<simulation::ClockState>>,
-    pub(crate) id: u64,
+    pub(crate) id: usize,
 }
 
 impl Alarm {

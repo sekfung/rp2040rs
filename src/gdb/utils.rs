@@ -3,7 +3,13 @@ pub fn encode_hex_byte(value: u8) -> String {
 }
 
 pub fn encode_hex_buf(buf: &[u8]) -> String {
-    buf.iter().map(|b| format!("{b:02x}")).collect()
+    const DIGITS: &[u8; 16] = b"0123456789abcdef";
+    let mut encoded = String::with_capacity(buf.len() * 2);
+    for &byte in buf {
+        encoded.push(char::from(DIGITS[usize::from(byte >> 4)]));
+        encoded.push(char::from(DIGITS[usize::from(byte & 0xf)]));
+    }
+    encoded
 }
 
 pub fn encode_hex_u32_le(value: u32) -> String {

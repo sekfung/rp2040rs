@@ -1,7 +1,7 @@
 use std::cell::RefCell;
 use std::rc::{Rc, Weak};
 
-use crate::clock::Alarm;
+use crate::clock::{Alarm, Clock};
 use crate::gpio_pin::SOURCE_PWM;
 use crate::irq::Irq;
 use crate::peripherals::dma::DreqChannel;
@@ -39,6 +39,36 @@ pub struct Pwm {
     pub channels: [PwmChannel; 8],
     state: Rc<RefCell<PwmState>>,
     board: Weak<RefCell<BoardShared>>,
+    clock: Rc<dyn Clock>,
+}
+
+#[derive(Clone, Copy)]
+struct CounterTiming {
+    first_tick: f64,
+    period: f64,
+    event_ticks: u32,
+}
+
+impl CounterTiming {
+    fn at(self, ticks: u32) -> f64 {
+        self.first_tick + f64::from(ticks - 1) * self.period
+    }
+
+    fn elapsed_before_event(self, now: f64) -> u32 {
+        if now < self.first_tick {
+            return 0;
+        }
+        let mut elapsed = (((now - self.first_tick) / self.period) as u32)
+            .saturating_add(1)
+            .min(self.event_ticks - 1);
+        // Rounding the quotient can move a read by one count at a tick boundary.
+        if elapsed != 0 && self.at(elapsed) > now {
+            elapsed -= 1;
+        } else if elapsed + 1 < self.event_ticks && self.at(elapsed + 1) <= now {
+            elapsed += 1;
+        }
+        elapsed
+    }
 }
 
 struct PwmState {
@@ -53,11 +83,91 @@ struct PwmState {
     top_updated: [bool; 8],
     counting_up: [bool; 8],
     div_prescaler: [f64; 8],
+    timing: [Option<CounterTiming>; 8],
     alarms: Vec<Alarm>,
     clock_freq: f64,
     int_raw: u32,
     int_enable: u32,
     int_force: u32,
+}
+
+impl PwmState {
+    fn int_status(&self) -> u32 {
+        (self.int_raw & self.int_enable) | self.int_force
+    }
+
+    fn phase_correct(&self, index: usize) -> bool {
+        self.csr[index] & CSR_PH_CORRECT != 0
+    }
+
+    fn counter_after(&self, index: usize, ticks: u32) -> u32 {
+        if self.phase_correct(index) && !self.counting_up[index] {
+            self.ctr[index] - ticks
+        } else {
+            self.ctr[index] + ticks
+        }
+    }
+
+    fn counter_at(&self, index: usize, now: f64) -> u32 {
+        self.timing[index].map_or(self.ctr[index], |timing| {
+            self.counter_after(index, timing.elapsed_before_event(now))
+        })
+    }
+
+    /// Store all quiet counts up to now and return the time of the next count.
+    fn sync_counter(&mut self, index: usize, now: f64) -> Option<f64> {
+        let timing = self.timing[index]?;
+        let elapsed = timing.elapsed_before_event(now);
+        self.ctr[index] = self.counter_after(index, elapsed);
+        Some(timing.at(elapsed + 1))
+    }
+
+    fn schedule(&mut self, index: usize, now: f64, first_tick: Option<f64>) {
+        let period = self.div_prescaler[index] * 1e9 / self.clock_freq;
+        if self.csr[index] & CSR_EN == 0 || !period.is_finite() || period <= 0.0 || !now.is_finite()
+        {
+            self.timing[index] = None;
+            self.alarms[index].cancel();
+            return;
+        }
+        let ctr = self.ctr[index];
+        let top = self.top[index];
+        let down = self.phase_correct(index) && !self.counting_up[index];
+        let mut event_ticks = if down {
+            ctr + 1
+        } else {
+            top.saturating_sub(ctr) + 1
+        };
+        for compare in [self.cc[index] & 0xffff, self.cc[index] >> 16] {
+            if down && compare < ctr {
+                event_ticks = event_ticks.min(ctr - compare);
+            } else if !down && (ctr < compare && compare <= top) {
+                event_ticks = event_ticks.min(compare - ctr);
+            }
+        }
+        // The NVIC can clear its pending bit while the peripheral level stays high.
+        if self.int_status() != 0 {
+            event_ticks = 1;
+        }
+        let timing = CounterTiming {
+            first_tick: first_tick.unwrap_or(now + period),
+            period,
+            event_ticks,
+        };
+        self.timing[index] = Some(timing);
+        self.alarms[index].schedule((timing.at(event_ticks) - now).max(0.0));
+    }
+
+    fn apply_double_buffered(&mut self, index: usize) {
+        if self.cc_updated[index] {
+            self.cc[index] = self.cc_pending[index];
+            self.cc_updated[index] = false;
+        }
+        if self.top_updated[index] {
+            self.top[index] = self.top_pending[index];
+            self.top_updated[index] = false;
+        }
+    }
 }
 
 impl Pwm {
@@ -78,6 +188,7 @@ impl Pwm {
             top_updated: [false; 8],
             counting_up: [true; 8],
             div_prescaler: [1.0; 8],
+            timing: [None; 8],
             alarms: Vec::with_capacity(8),
             clock_freq: 125_000_000.0,
             int_raw: 0,
@@ -88,8 +199,11 @@ impl Pwm {
         for index in 0..8 {
             let state_for_alarm = state.clone();
             let board_for_alarm = board.clone();
+            let clock_for_alarm = Rc::downgrade(&clock);
             let alarm = clock.create_alarm(Box::new(move || {
-                pwm_tick(&state_for_alarm, &board_for_alarm, index);
+                if let Some(clock) = clock_for_alarm.upgrade() {
+                    pwm_tick(&state_for_alarm, &board_for_alarm, index, clock.nanos());
+                }
             }));
             alarms.push(alarm);
         }
@@ -101,17 +215,21 @@ impl Pwm {
             }),
             state,
             board,
+            clock,
         }
     }
 
     pub fn set_clock_freq(&self, frequency: f64) {
-        self.state.borrow_mut().clock_freq = frequency;
+        let now = self.clock.nanos();
+        let mut state = self.state.borrow_mut();
+        state.clock_freq = frequency;
         for channel in &self.channels {
             channel.timer.set_frequency(frequency);
         }
         for index in 0..8 {
-            if self.state.borrow().csr[index] & CSR_EN != 0 {
-                self.schedule_wrap(index);
+            if state.csr[index] & CSR_EN != 0 {
+                state.sync_counter(index, now);
+                state.schedule(index, now, None);
             }
         }
     }
@@ -132,14 +250,14 @@ impl Pwm {
         state.top_updated = [false; 8];
         state.counting_up = [true; 8];
         state.div_prescaler = [1.0; 8];
+        state.timing = [None; 8];
         state.int_raw = 0;
         state.int_enable = 0;
         state.int_force = 0;
     }
 
     fn int_status(&self) -> u32 {
-        let state = self.state.borrow();
-        (state.int_raw & state.int_enable) | state.int_force
+        self.state.borrow().int_status()
     }
 
     fn check_interrupts(&self) {
@@ -150,34 +268,15 @@ impl Pwm {
         }
     }
 
-    fn schedule_wrap(&self, index: usize) {
-        let (freq, enabled, mut alarm) = {
-            let state = self.state.borrow();
-            (
-                state.clock_freq,
-                state.csr[index] & CSR_EN != 0,
-                state.alarms[index].clone(),
-            )
-        };
-        if !enabled || freq <= 0.0 {
-            alarm.cancel();
-            return;
-        }
-        let prescaler = self.state.borrow().div_prescaler[index];
-        let nanos = prescaler * 1_000_000_000.0 / freq;
-        alarm.schedule(nanos);
-        self.state.borrow_mut().alarms[index] = alarm;
-    }
-
-    fn apply_double_buffered(&self, index: usize) {
+    fn reschedule_interrupt_change(&self, old_status: u32) {
+        let now = self.clock.nanos();
         let mut state = self.state.borrow_mut();
-        if state.cc_updated[index] {
-            state.cc[index] = state.cc_pending[index];
-            state.cc_updated[index] = false;
-        }
-        if state.top_updated[index] {
-            state.top[index] = state.top_pending[index];
-            state.top_updated[index] = false;
+        if (old_status == 0) != (state.int_status() == 0) {
+            for index in 0..8 {
+                if let Some(next_tick) = state.sync_counter(index, now) {
+                    state.schedule(index, now, Some(next_tick));
+                }
+            }
         }
     }
 
@@ -243,21 +342,16 @@ impl Pwm {
             .unwrap_or(0)
     }
 
-    fn cancel_wrap(&self, index: usize) {
-        let mut state = self.state.borrow_mut();
-        if let Some(alarm) = state.alarms.get_mut(index) {
-            alarm.cancel();
-        }
-    }
-
     fn write_channel(&self, index: usize, register: u32, value: u32, atomic_type: u32) {
-        let old_csr = self.state.borrow().csr[index];
+        let now = self.clock.nanos();
+        let mut state = self.state.borrow_mut();
+        let old_csr = state.csr[index];
         let current = match register {
             CHN_CSR => old_csr,
-            CHN_DIV => self.state.borrow().div[index],
-            CHN_CTR => self.state.borrow().ctr[index],
-            CHN_CC => self.state.borrow().cc[index],
-            CHN_TOP => self.state.borrow().top[index],
+            CHN_DIV => state.div[index],
+            CHN_CTR => state.counter_at(index, now),
+            CHN_CC => state.cc[index],
+            CHN_TOP => state.top[index],
             _ => 0,
         };
         let atomic_value = if atomic_type == 0 {
@@ -269,10 +363,10 @@ impl Pwm {
             CHN_CSR => {
                 let old_enabled = old_csr & CSR_EN != 0;
                 let new_enabled = atomic_value & CSR_EN != 0;
+                state.sync_counter(index, now);
                 if new_enabled && !old_enabled {
-                    self.apply_double_buffered(index);
+                    state.apply_double_buffered(index);
                 }
-                let mut state = self.state.borrow_mut();
                 state.csr[index] = atomic_value & !(CSR_PH_ADV | CSR_PH_RET);
                 if new_enabled {
                     if atomic_value & CSR_PH_ADV != 0 {
@@ -287,16 +381,11 @@ impl Pwm {
                         };
                     }
                 }
+                let div_mode = (state.csr[index] >> CSR_DIVMODE_SHIFT) & CSR_DIVMODE_MASK;
+                state.schedule(index, now, None);
                 drop(state);
-                let csr = self.state.borrow().csr[index];
-                let div_mode = (csr >> CSR_DIVMODE_SHIFT) & CSR_DIVMODE_MASK;
                 self.set_a_direction(index, new_enabled);
                 self.set_b_direction(index, new_enabled && div_mode == 0);
-                if new_enabled {
-                    self.schedule_wrap(index);
-                } else if old_enabled {
-                    self.cancel_wrap(index);
-                }
             }
             CHN_DIV => {
                 let div = atomic_value & 0x000f_ffff;
@@ -307,21 +396,22 @@ impl Pwm {
                 } else {
                     f64::from(int_value)
                 } + f64::from(frac_value) / 16.0;
-                let mut state = self.state.borrow_mut();
+                let next_tick = state.sync_counter(index, now);
                 state.div[index] = div;
                 state.div_prescaler[index] = prescaler;
+                if let Some(next_tick) = next_tick {
+                    state.schedule(index, now, Some(next_tick));
+                }
             }
             CHN_CTR => {
-                self.state.borrow_mut().ctr[index] = atomic_value & 0xffff;
-                self.schedule_wrap(index);
+                state.ctr[index] = atomic_value & 0xffff;
+                state.schedule(index, now, None);
             }
             CHN_CC => {
-                let mut state = self.state.borrow_mut();
                 state.cc_pending[index] = atomic_value;
                 state.cc_updated[index] = true;
             }
             CHN_TOP => {
-                let mut state = self.state.borrow_mut();
                 state.top_pending[index] = atomic_value & 0xffff;
                 state.top_updated[index] = true;
             }
@@ -330,9 +420,13 @@ impl Pwm {
     }
 }
 
-fn pwm_tick(state: &Rc<RefCell<PwmState>>, board: &Weak<RefCell<BoardShared>>, index: usize) {
-    let (wrapped, cc, ctr, enabled, freq, prescaler, mut alarm, csr) = {
+fn pwm_tick(state: &RefCell<PwmState>, board: &Weak<RefCell<BoardShared>>, index: usize, now: f64) {
+    let (wrapped, cc, ctr, csr, status) = {
         let mut state = state.borrow_mut();
+        let Some(timing) = state.timing[index] else {
+            return;
+        };
+        state.ctr[index] = state.counter_after(index, timing.event_ticks - 1);
         let mut wrapped = false;
         let csr = state.csr[index];
         if csr & CSR_PH_CORRECT != 0 {
@@ -356,35 +450,26 @@ fn pwm_tick(state: &Rc<RefCell<PwmState>>, board: &Weak<RefCell<BoardShared>>, i
             }
         }
         if wrapped {
+            let old_status = state.int_status();
             state.int_raw |= 1 << index;
-            if state.cc_updated[index] {
-                state.cc[index] = state.cc_pending[index];
-                state.cc_updated[index] = false;
-            }
-            if state.top_updated[index] {
-                state.top[index] = state.top_pending[index];
-                state.top_updated[index] = false;
+            state.apply_double_buffered(index);
+            if old_status == 0 && state.int_status() != 0 {
+                for other in (0..8).filter(|&other| other != index) {
+                    if let Some(next_tick) = state.sync_counter(other, now) {
+                        state.schedule(other, now, Some(next_tick));
+                    }
+                }
             }
         }
-        let enabled = state.csr[index] & CSR_EN != 0;
-        let freq = state.clock_freq;
+        state.schedule(index, now, None);
         (
             wrapped,
             state.cc[index],
             state.ctr[index],
-            enabled,
-            freq,
-            state.div_prescaler[index],
-            state.alarms[index].clone(),
             csr,
+            state.int_status(),
         )
     };
-    if enabled && freq > 0.0 {
-        alarm.schedule(prescaler * 1_000_000_000.0 / freq);
-        state.borrow_mut().alarms[index] = alarm;
-    } else {
-        alarm.cancel();
-    }
     if wrapped {
         if let Some(board) = board.upgrade() {
             set_pwm_pin(&board, index, index * 2, cc & 0xffff != 0, csr);
@@ -416,10 +501,6 @@ fn pwm_tick(state: &Rc<RefCell<PwmState>>, board: &Weak<RefCell<BoardShared>>, i
     }
     if let Some(board) = board.upgrade() {
         let core = board.borrow().core.clone();
-        let status = {
-            let state = state.borrow();
-            (state.int_raw & state.int_enable) | state.int_force
-        };
         core.set_interrupt(Irq::PwmWrap as u32, status != 0);
     }
 }
@@ -457,7 +538,7 @@ impl Peripheral for Pwm {
             return match register {
                 CHN_CSR => state.csr[index],
                 CHN_DIV => state.div[index],
-                CHN_CTR => state.ctr[index],
+                CHN_CTR => state.counter_at(index, self.clock.nanos()),
                 CHN_CC => state.cc[index],
                 CHN_TOP => state.top[index],
                 _ => 0,
@@ -495,29 +576,25 @@ impl Peripheral for Pwm {
                 } else {
                     atomic_update(current, atomic_type, value)
                 } & 0xff;
+                let now = self.clock.nanos();
                 for index in 0..8 {
-                    let old_enabled = self.state.borrow().csr[index] & CSR_EN != 0;
+                    let mut state = self.state.borrow_mut();
+                    let old_enabled = state.csr[index] & CSR_EN != 0;
                     let enabled = enabled_mask & (1 << index) != 0;
-                    if enabled && !old_enabled {
-                        self.apply_double_buffered(index);
-                    }
-                    {
-                        let mut state = self.state.borrow_mut();
+                    if enabled != old_enabled {
+                        state.sync_counter(index, now);
                         if enabled {
+                            state.apply_double_buffered(index);
                             state.csr[index] |= CSR_EN;
                         } else {
                             state.csr[index] &= !CSR_EN;
                         }
+                        state.schedule(index, now, None);
                     }
-                    let div_mode =
-                        (self.state.borrow().csr[index] >> CSR_DIVMODE_SHIFT) & CSR_DIVMODE_MASK;
+                    let div_mode = (state.csr[index] >> CSR_DIVMODE_SHIFT) & CSR_DIVMODE_MASK;
+                    drop(state);
                     self.set_a_direction(index, enabled);
                     self.set_b_direction(index, enabled && div_mode == 0);
-                    if enabled && !old_enabled {
-                        self.schedule_wrap(index);
-                    } else if !enabled && old_enabled {
-                        self.cancel_wrap(index);
-                    }
                 }
             }
             INTR => {
@@ -527,7 +604,9 @@ impl Peripheral for Pwm {
                 } else {
                     atomic_update(current, atomic_type, value)
                 } & 0xff;
+                let old_status = self.int_status();
                 self.state.borrow_mut().int_raw &= !clear_mask;
+                self.reschedule_interrupt_change(old_status);
                 self.check_interrupts();
             }
             INTE => {
@@ -537,7 +616,9 @@ impl Peripheral for Pwm {
                 } else {
                     atomic_update(current, atomic_type, value)
                 };
+                let old_status = self.int_status();
                 self.state.borrow_mut().int_enable = atomic_value & 0xff;
+                self.reschedule_interrupt_change(old_status);
                 self.check_interrupts();
             }
             INTF => {
@@ -547,7 +628,9 @@ impl Peripheral for Pwm {
                 } else {
                     atomic_update(current, atomic_type, value)
                 };
+                let old_status = self.int_status();
                 self.state.borrow_mut().int_force = atomic_value & 0xff;
+                self.reschedule_interrupt_change(old_status);
                 self.check_interrupts();
             }
             _ => {}

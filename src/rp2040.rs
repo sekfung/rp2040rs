@@ -94,23 +94,12 @@ impl Memory {
 
     fn read_u32(&self, offset: usize) -> Option<u32> {
         let bytes = self.0.borrow();
-        if offset.checked_add(4)? > bytes.len() {
-            return None;
-        }
-        Some(u32::from_le_bytes([
-            bytes[offset],
-            bytes[offset + 1],
-            bytes[offset + 2],
-            bytes[offset + 3],
-        ]))
+        Some(u32::from_le_bytes(*bytes.get(offset..)?.first_chunk()?))
     }
 
     fn read_u16(&self, offset: usize) -> Option<u16> {
         let bytes = self.0.borrow();
-        if offset.checked_add(2)? > bytes.len() {
-            return None;
-        }
-        Some(u16::from_le_bytes([bytes[offset], bytes[offset + 1]]))
+        Some(u16::from_le_bytes(*bytes.get(offset..)?.first_chunk()?))
     }
 
     fn write_u32(&self, offset: usize, value: u32) {
@@ -710,26 +699,21 @@ impl Bus {
             ));
         }
         let board = self.0.borrow();
-        let bootrom_len = board.bootrom.len();
-        if (address as usize) < bootrom_len {
+        if (address as usize) < BOOTROM_SIZE {
             if let Some(value) = board.bootrom.read_u32(address as usize) {
                 return value;
             }
         } else if (FLASH_START_ADDRESS..FLASH_END_ADDRESS).contains(&address) {
             let offset = (address & 0x00ff_ffff) as usize;
-            if offset + 3 < board.flash.len() {
-                if let Some(value) = board.flash.read_u32(offset) {
-                    return value;
-                }
+            if let Some(value) = board.flash.read_u32(offset) {
+                return value;
             }
-        } else if address >= RAM_START_ADDRESS
-            && address.wrapping_add(3) < RAM_START_ADDRESS + board.sram.len() as u32
-        {
+        } else if (RAM_START_ADDRESS..RAM_START_ADDRESS + SRAM_SIZE as u32).contains(&address) {
             if let Some(value) = board.sram.read_u32((address - RAM_START_ADDRESS) as usize) {
                 return value;
             }
-        } else if address >= DPRAM_START_ADDRESS
-            && address.wrapping_add(3) < DPRAM_START_ADDRESS + board.usb_dpram.len() as u32
+        } else if (DPRAM_START_ADDRESS..DPRAM_START_ADDRESS + USB_DPRAM_SIZE as u32)
+            .contains(&address)
         {
             if let Some(value) = board
                 .usb_dpram
@@ -759,19 +743,20 @@ impl Bus {
 
     pub(crate) fn read_u16(&self, address: u32) -> u16 {
         let board = self.0.borrow();
-        if address >= FLASH_START_ADDRESS
-            && address.wrapping_add(1) < FLASH_START_ADDRESS + board.flash.len() as u32
-        {
+        if (FLASH_START_ADDRESS..FLASH_START_ADDRESS + FLASH_SIZE as u32 - 1).contains(&address) {
             if let Some(value) = board
                 .flash
                 .read_u16((address - FLASH_START_ADDRESS) as usize)
             {
                 return value;
             }
-        } else if address >= RAM_START_ADDRESS
-            && address.wrapping_add(1) < RAM_START_ADDRESS + board.sram.len() as u32
-        {
+        } else if (RAM_START_ADDRESS..RAM_START_ADDRESS + SRAM_SIZE as u32 - 1).contains(&address) {
             if let Some(value) = board.sram.read_u16((address - RAM_START_ADDRESS) as usize) {
+                return value;
+            }
+        } else if (address as usize) < BOOTROM_SIZE {
+            // Boot ROM subword reads select a halfword from an aligned word.
+            if let Some(value) = board.bootrom.read_u16((address & !1) as usize) {
                 return value;
             }
         }
@@ -786,14 +771,12 @@ impl Bus {
 
     pub(crate) fn read_u8(&self, address: u32) -> u8 {
         let board = self.0.borrow();
-        if address >= FLASH_START_ADDRESS
-            && address < FLASH_START_ADDRESS + board.flash.len() as u32
-        {
+        if (FLASH_START_ADDRESS..FLASH_START_ADDRESS + FLASH_SIZE as u32).contains(&address) {
             return board.flash.byte((address - FLASH_START_ADDRESS) as usize);
-        } else if address >= RAM_START_ADDRESS
-            && address < RAM_START_ADDRESS + board.sram.len() as u32
-        {
+        } else if (RAM_START_ADDRESS..RAM_START_ADDRESS + SRAM_SIZE as u32).contains(&address) {
             return board.sram.byte((address - RAM_START_ADDRESS) as usize);
+        } else if (address as usize) < BOOTROM_SIZE {
+            return board.bootrom.byte(address as usize);
         }
         drop(board);
         let value = self.read_u16(address & !0x1);

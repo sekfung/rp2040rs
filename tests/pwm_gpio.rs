@@ -10,6 +10,7 @@ const CH0_CTR: u32 = PWM_BASE + 0x08;
 const CH0_CC: u32 = PWM_BASE + 0x0c;
 const CH0_TOP: u32 = PWM_BASE + 0x10;
 const PWM_INTR: u32 = PWM_BASE + 0xa4;
+const PWM_INTE: u32 = PWM_BASE + 0xa8;
 const CSR_EN: u32 = 1;
 
 #[test]
@@ -149,4 +150,89 @@ fn pwm_phase_correct_counts_down_after_top() {
     clock.tick(8.0 * 3.0);
     assert_eq!(rp.read_u32(CH0_CTR), 1);
     assert_eq!(rp.read_u32(PWM_INTR) & 1, 1);
+}
+
+#[test]
+fn pwm_schedules_only_observable_events_and_reads_intermediate_counts() {
+    let clock = Rc::new(SimulationClock::new());
+    let rp = Rp2040::with_clock(clock.clone());
+    rp.write_u32(CH0_TOP, 999);
+    rp.write_u32(CH0_CC, (700 << 16) | 300);
+    rp.write_u32(CH0_CSR, CSR_EN);
+
+    assert_eq!(clock.nanos_to_next_alarm(), Some(2400.0));
+    clock.tick(2399.0);
+    assert_eq!(rp.read_u32(CH0_CTR), 299);
+    clock.tick(1.0);
+    assert_eq!(rp.read_u32(CH0_CTR), 300);
+    assert_eq!(clock.nanos_to_next_alarm(), Some(3200.0));
+    clock.tick(3200.0);
+    assert_eq!(rp.read_u32(CH0_CTR), 700);
+    clock.tick(2400.0);
+    assert_eq!(rp.read_u32(CH0_CTR), 0);
+    assert_eq!(rp.read_u32(PWM_INTR) & 1, 1);
+}
+
+#[test]
+fn pwm_divider_write_preserves_the_next_count_and_changes_following_counts() {
+    let clock = Rc::new(SimulationClock::new());
+    let rp = Rp2040::with_clock(clock.clone());
+    rp.write_u32(CH0_TOP, 500);
+    rp.write_u32(CH0_CSR, CSR_EN);
+    clock.tick(35.0);
+    assert_eq!(rp.read_u32(CH0_CTR), 4);
+    rp.write_u32(CH0_DIV, 0x28); // 2.5 cycles = 20 ns
+    clock.tick(5.0);
+    assert_eq!(rp.read_u32(CH0_CTR), 5);
+    clock.tick(19.0);
+    assert_eq!(rp.read_u32(CH0_CTR), 5);
+    clock.tick(1.0);
+    assert_eq!(rp.read_u32(CH0_CTR), 6);
+
+    rp.write_u32(CH0_CSR, 0);
+    clock.tick(1_000.0);
+    assert_eq!(rp.read_u32(CH0_CTR), 6);
+    rp.write_u32(CH0_CSR, CSR_EN);
+    clock.tick(20.0);
+    assert_eq!(rp.read_u32(CH0_CTR), 7);
+}
+
+#[test]
+fn pwm_reasserts_the_pending_irq_while_the_wrap_flag_is_set() {
+    const PWM_IRQ: u32 = 1 << 4;
+
+    let clock = Rc::new(SimulationClock::new());
+    let rp = Rp2040::with_clock(clock.clone());
+    rp.write_u32(CH0_TOP, 99);
+    rp.write_u32(PWM_INTE, 1);
+    rp.write_u32(CH0_CSR, CSR_EN);
+    clock.tick(800.0);
+    assert_eq!(rp.core.pending_interrupts() & PWM_IRQ, PWM_IRQ);
+
+    rp.core
+        .set_pending_interrupts(rp.core.pending_interrupts() & !PWM_IRQ);
+    assert_eq!(rp.core.pending_interrupts() & PWM_IRQ, 0);
+    clock.tick(8.0);
+    assert_eq!(rp.core.pending_interrupts() & PWM_IRQ, PWM_IRQ);
+
+    rp.write_u32(PWM_INTR, 1);
+    assert_eq!(rp.core.pending_interrupts() & PWM_IRQ, 0);
+    assert_eq!(clock.nanos_to_next_alarm(), Some(792.0));
+}
+
+#[test]
+fn pwm_running_clock_change_preserves_count_and_retimes_compare() {
+    let clock = Rc::new(SimulationClock::new());
+    let rp = Rp2040::with_clock(clock.clone());
+    rp.write_u32(CH0_TOP, 999);
+    rp.write_u32(CH0_CC, 10);
+    rp.write_u32(CH0_CSR, CSR_EN);
+    clock.tick(35.0);
+    rp.pwm.set_clock_freq(100_000_000.0);
+    assert_eq!(rp.read_u32(CH0_CTR), 4);
+    assert_eq!(clock.nanos_to_next_alarm(), Some(60.0));
+    clock.tick(59.0);
+    assert_eq!(rp.read_u32(CH0_CTR), 9);
+    clock.tick(1.0);
+    assert_eq!(rp.read_u32(CH0_CTR), 10);
 }

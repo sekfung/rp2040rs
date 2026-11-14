@@ -41,6 +41,31 @@ fn zero_delta_alarm_fires_while_waiting() {
 }
 
 #[test]
+fn pending_alarm_wakes_wfi_and_executes_the_irq_handler() {
+    let mut sim = Simulator::new();
+    let main = 0x2000_0000;
+    let handler = main + 0x20;
+    sim.rp2040.write_u16(main, opcode_wfi());
+    sim.rp2040.write_u16(handler, opcode_nop());
+    sim.rp2040.write_u32(16 * 4, handler | 1);
+    sim.rp2040.core.set_pc(main);
+    sim.rp2040.core.set_sp(main + 0x100);
+    sim.rp2040.core.set_enabled_interrupts(1);
+
+    let core = sim.rp2040.core.clone();
+    let mut alarm = sim.clock().create_alarm(Box::new(move || {
+        assert!(core.waiting());
+        core.set_interrupt(0, true);
+    }));
+    alarm.schedule(100.0);
+
+    sim.execute_steps(3);
+    assert_eq!(sim.rp2040.core.pc() & !1, handler + 2);
+    assert_eq!(sim.rp2040.core.ipsr(), 16);
+    assert_eq!(sim.clock().nanos(), 108.0);
+}
+
+#[test]
 fn explicit_stop_keeps_target_stopped() {
     let mut sim = Simulator::new();
     sim.stop();

@@ -1,4 +1,4 @@
-use std::cell::{Cell, RefCell};
+use std::cell::Cell;
 use std::env;
 use std::fs;
 use std::io::{self, Write};
@@ -89,11 +89,43 @@ fn load_image(rp2040: &Rp2040, path: &PathBuf) -> Result<usize, String> {
     }
 }
 
-fn contains_bytes(haystack: &[u8], needle: &[u8]) -> bool {
-    !needle.is_empty()
-        && haystack
-            .windows(needle.len())
-            .any(|window| window == needle)
+struct ExpectedText {
+    bytes: Vec<u8>,
+    prefix_lengths: Vec<usize>,
+    matched: usize,
+}
+
+impl ExpectedText {
+    fn new(text: String) -> Self {
+        let mut pattern = Self {
+            prefix_lengths: vec![0; text.len()],
+            bytes: text.into_bytes(),
+            matched: 0,
+        };
+        for index in 1..pattern.bytes.len() {
+            let prefix = pattern.prefix_lengths[index - 1];
+            pattern.prefix_lengths[index] = pattern.advance(prefix, pattern.bytes[index]);
+        }
+        pattern
+    }
+
+    // Keep the longest prefix that is also a suffix of the bytes seen so far.
+    fn advance(&self, mut prefix: usize, byte: u8) -> usize {
+        while prefix > 0 && self.bytes[prefix] != byte {
+            prefix = self.prefix_lengths[prefix - 1];
+        }
+        prefix + usize::from(self.bytes[prefix] == byte)
+    }
+
+    fn push(&mut self, byte: u8) -> bool {
+        if self.bytes.is_empty() {
+            return false;
+        }
+        if self.matched < self.bytes.len() {
+            self.matched = self.advance(self.matched, byte);
+        }
+        self.matched == self.bytes.len()
+    }
 }
 
 fn main() {
@@ -107,27 +139,21 @@ fn main() {
     }
     simulator.rp2040.core.set_pc(FLASH_START);
 
-    let output = Rc::new(RefCell::new(Vec::<u8>::new()));
-    let expected = options.expect_text.clone();
+    let expects_text = options.expect_text.is_some();
+    let mut expected = options.expect_text.map(ExpectedText::new);
     let found = Rc::new(Cell::new(false));
-    let output_for_uart = output.clone();
     let found_for_uart = found.clone();
-    let expected_for_uart = expected.clone();
     simulator.rp2040.uart[0].set_on_byte(Box::new(move |byte| {
         let mut stdout = io::stdout().lock();
         let _ = stdout.write_all(&[byte]);
         let _ = stdout.flush();
-        let mut collected = output_for_uart.borrow_mut();
-        collected.push(byte);
-        if let Some(expected) = expected_for_uart.as_deref() {
-            if contains_bytes(&collected, expected.as_bytes()) {
-                found_for_uart.set(true);
-            }
+        if !found_for_uart.get() && expected.as_mut().is_some_and(|pattern| pattern.push(byte)) {
+            found_for_uart.set(true);
         }
     }));
 
     if options.gdb {
-        if expected.is_some() {
+        if expects_text {
             eprintln!("rp2040rs: --expect-text cannot be combined with --gdb");
             process::exit(2);
         }
@@ -151,7 +177,7 @@ fn main() {
         return;
     }
 
-    if expected.is_none() {
+    if !expects_text {
         loop {
             simulator.execute_once();
         }
@@ -165,4 +191,25 @@ fn main() {
     }
     eprintln!("rp2040rs: expected text was not observed");
     process::exit(1);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ExpectedText;
+
+    #[test]
+    fn uart_match_keeps_overlapping_prefixes_across_bytes() {
+        let mut pattern = ExpectedText::new("ababac".into());
+        for byte in b"abababa" {
+            assert!(!pattern.push(*byte));
+        }
+        assert!(pattern.push(b'c'));
+        assert!(pattern.push(b'x'));
+    }
+
+    #[test]
+    fn empty_expected_text_never_matches() {
+        let mut pattern = ExpectedText::new(String::new());
+        assert!(!pattern.push(b'a'));
+    }
 }

@@ -86,6 +86,45 @@ fn rescheduling_moves_an_alarm() {
 }
 
 #[test]
+fn a_callback_can_cancel_and_reschedule_another_due_alarm() {
+    let clock = SimulationClock::new();
+    let fired = Rc::new(RefCell::new(Vec::new()));
+    let sink = fired.clone();
+    let callback_clock = clock.clone();
+    let mut later = clock.create_alarm(Box::new(move || {
+        sink.borrow_mut().push(callback_clock.nanos());
+    }));
+    later.schedule(10.0);
+
+    let mut replacement = later.clone();
+    let mut first = clock.create_alarm(Box::new(move || {
+        replacement.cancel();
+        replacement.schedule(2.0);
+    }));
+    first.schedule(10.0);
+    clock.tick(10.0);
+    assert!(fired.borrow().is_empty());
+    assert_eq!(clock.nanos_to_next_alarm(), Some(2.0));
+    clock.tick(10.0);
+    assert_eq!(*fired.borrow(), [12.0]);
+    assert_eq!(clock.nanos(), 20.0);
+    assert_eq!(clock.nanos_to_next_alarm(), None);
+}
+
+#[test]
+fn nan_deadlines_do_not_hide_finite_alarms() {
+    let clock = SimulationClock::new();
+    let mut alarm = clock.create_alarm(Box::new(|| panic!("NaN alarm fired")));
+    alarm.schedule(1.0);
+    alarm.schedule(f64::NAN);
+    let mut finite = clock.create_alarm(Box::new(|| {}));
+    finite.schedule(2.0);
+    assert_eq!(clock.nanos_to_next_alarm(), Some(2.0));
+    clock.tick(3.0);
+    assert_eq!(clock.nanos_to_next_alarm(), None);
+}
+
+#[test]
 fn mock_clock_advances_in_microseconds() {
     let clock = MockClock::new();
     clock.advance(250);

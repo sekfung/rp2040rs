@@ -54,8 +54,6 @@ pub enum DreqChannel {
 pub const DREQ_MAX: usize = 40;
 const TREQ_PERMANENT: u32 = 0x3f;
 const TREQ_TIMER0: u32 = 0x3b;
-const TREQ_TIMER1: u32 = 0x3c;
-const TREQ_TIMER2: u32 = 0x3d;
 const TREQ_TIMER3: u32 = 0x3e;
 
 const CH_READ_ADDR: u32 = 0x000;
@@ -202,15 +200,16 @@ impl Dma {
         let treq = channel as u32;
         if !state.dreq[index] {
             state.dreq[index] = true;
-            let active = state
+            let mut active = state
                 .channels
                 .iter()
                 .enumerate()
                 .filter(|(_, channel)| channel.treq_value == treq && channel.ctrl & BUSY != 0)
-                .map(|(index, _)| index as u32)
-                .collect::<Vec<_>>();
+                .fold(0u32, |mask, (index, _)| mask | (1 << index));
             drop(state);
-            for index in active {
+            while active != 0 {
+                let index = active.trailing_zeros();
+                active &= active - 1;
                 self.schedule(index);
             }
         }
@@ -253,41 +252,30 @@ impl Dma {
     }
 
     fn schedule(&self, index: u32) {
-        let (treq, dreq, delay) = {
-            let state = self.state.borrow();
-            let Some(channel) = state.channels.get(index as usize) else {
-                return;
-            };
-            let treq = channel.treq_value;
-            (
-                treq,
-                state.dreq.get(treq as usize).copied().unwrap_or(false),
-                self.timer(treq),
-            )
+        let mut state = self.state.borrow_mut();
+        let DmaState {
+            channels,
+            dreq,
+            timers,
+            ..
+        } = &mut *state;
+        let Some(channel) = channels.get_mut(index as usize) else {
+            return;
         };
-        if dreq || treq == TREQ_PERMANENT {
-            if let Some(channel) = self.state.borrow_mut().channels.get_mut(index as usize) {
-                channel.transfer_alarm.schedule(0.0);
-            }
-        } else if delay > 0.0 {
-            if let Some(channel) = self.state.borrow_mut().channels.get_mut(index as usize) {
+        let treq = channel.treq_value;
+        if treq == TREQ_PERMANENT || dreq.get(treq as usize).copied().unwrap_or(false) {
+            channel.transfer_alarm.schedule(0.0);
+        } else if (TREQ_TIMER0..=TREQ_TIMER3).contains(&treq) {
+            let delay = self.timer_delay_micros(timers[(treq - TREQ_TIMER0) as usize]);
+            if delay > 0.0 {
                 channel.transfer_alarm.schedule(delay * 1000.0);
             }
         }
     }
 
-    fn timer(&self, treq: u32) -> f64 {
-        let (timer_value, divisor) = {
-            let state = self.state.borrow();
-            match treq {
-                TREQ_PERMANENT => (1, 1),
-                TREQ_TIMER0 | TREQ_TIMER1 | TREQ_TIMER2 | TREQ_TIMER3 => {
-                    let timer = state.timers[(treq - TREQ_TIMER0) as usize];
-                    (timer >> 16, timer & 0xffff)
-                }
-                _ => (0, 1),
-            }
-        };
+    fn timer_delay_micros(&self, timer: u32) -> f64 {
+        let timer_value = timer >> 16;
+        let divisor = timer & 0xffff;
         if divisor == 0 {
             return 0.0;
         }
@@ -323,7 +311,7 @@ impl Dma {
         let Some(board) = board else {
             return;
         };
-        let bus = crate::rp2040::Bus(board.clone());
+        let bus = crate::rp2040::Bus(board);
         match data_size {
             2 => {
                 let value = bus.read_u16(read_addr);

@@ -112,8 +112,25 @@ impl GpioPin {
         apply_override(value, (self.ctrl.get() >> 16) & 0x3)
     }
 
+    #[inline]
+    pub(crate) fn pio_input_value(&self) -> bool {
+        let ctrl = self.ctrl.get();
+        if let Some(source) = Self::source_for_function(ctrl & 0x1f) {
+            let bit = 1 << self.index;
+            if self.source_output_enable[source].get() & bit != 0 {
+                return self.source_output_value[source].get() & bit != 0;
+            }
+        }
+        let value = self.raw_input_value.get() && self.input_enable();
+        apply_override(value, (ctrl >> 16) & 0x3)
+    }
+
     fn active_source(&self) -> Option<usize> {
-        match self.function_select() {
+        Self::source_for_function(self.function_select())
+    }
+
+    fn source_for_function(function: u32) -> Option<usize> {
+        match function {
             FUNCTION_PWM => Some(SOURCE_PWM),
             FUNCTION_SIO => Some(SOURCE_SIO),
             FUNCTION_PIO0 => Some(SOURCE_PIO0),
